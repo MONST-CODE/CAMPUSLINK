@@ -1,0 +1,7 @@
+test_limit (__main__.Protocol.test_limit) ... ok
+test_roundtrip (__main__.Protocol.test_roundtrip) ... ok
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.002s
+
+OK

@@ -1,0 +1,140 @@
+name: Windows x64
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: windows-2022
+    timeout-minutes: 35
+    defaults:
+      run:
+        working-directory: Campus Link
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: Campus Link
+          persist-credentials: false
+      - name: Install hash-verified SDL3, ImGui and LLVM
+        shell: powershell
+        run: .\scripts\setup-deps.ps1 -InstallPinnedLLVM
+      - name: Validate environment
+        shell: cmd
+        run: call build.bat doctor
+      - name: Validate ASCII fallback and UTF-8 build logs
+        shell: powershell
+        run: |
+          $env:CAMPUSLINK_ASCII = '1'; $env:NO_COLOR = '1'
+          $lines = @(& cmd.exe /d /c call build.bat help)
+          if ($LASTEXITCODE -ne 0 -or -not ($lines -match 'CAMPUSLINK') -or ($lines -match '[^\x00-\x7f]')) {
+            throw 'ASCII build help failed'
+          }
+          $latest = Get-ChildItem logs/build -Filter '*.log' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          $bytes = [IO.File]::ReadAllBytes($latest.FullName)
+          if ($bytes.Length -lt 3 -or $bytes[0] -ne 239 -or $bytes[1] -ne 187 -or $bytes[2] -ne 191) { throw 'Expected UTF-8 BOM' }
+      - name: Verify invalid command exit code
+        shell: cmd
+        run: |
+          call build.bat bad-command
+          if not "%ERRORLEVEL%"=="2" exit /b 1
+          exit /b 0
+      - name: CLP1 loopback protocol test
+        shell: cmd
+        run: python tests\integration\clp1_loopback.py
+      - name: Package command
+        shell: cmd
+        run: call build.bat package
+      - name: Build Debug and Release, run tests and verify local release
+        shell: cmd
+        run: call build.bat release-all
+      - name: Exercise the native Winsock CLP1 client (fixed loopback)
+        shell: cmd
+        run: python tests\integration\clp1_native.py build\bin\release\CampusLink.exe
+      - name: Verify clean preserves the package and evidence
+        shell: cmd
+        run: |
+          call build.bat clean
+          if errorlevel 1 exit /b 1
+          if exist build\bin exit /b 1
+          if exist build\obj exit /b 1
+          if not exist logs\build exit /b 1
+          if not exist dist\packages\*.zip exit /b 1
+          for /f "usebackq delims=" %%v in ("VERSION") do if not exist "dist\releases\v%%v\SHA256SUMS.txt" exit /b 1
+      - name: Expose build evidence on the check run
+        if: always()
+        shell: powershell
+        run: |
+          $checksum = Get-ChildItem dist/releases -Filter SHA256SUMS.txt -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($checksum) {
+            foreach ($line in (Get-Content -LiteralPath $checksum.FullName)) {
+              Write-Output "::notice title=Verified release SHA-256::$line"
+              Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value $line
+            }
+            $info = Get-Content -LiteralPath (Join-Path $checksum.DirectoryName 'BUILD_INFO.json') -Raw | ConvertFrom-Json
+            Write-Output "::notice title=Build tools::Windows SDK $($info.sdk); VC $($info.vcToolset); $($info.compiler -split [Environment]::NewLine | Select-Object -First 1)"
+          }
+          if (Test-Path logs/build) {
+            $logs = Get-ChildItem logs/build -Filter '*.log' | Sort-Object LastWriteTime -Descending
+            foreach ($log in $logs) {
+              $hits = Get-Content -LiteralPath $log.FullName | Where-Object { $_ -match '(?i)\[FAIL\]|error:|LNK[0-9]+|SUMMARY|Verified SHA-256|Native inventory:|maximum_completed_within_budgets=' } | Select-Object -Last 13
+              foreach ($line in $hits) {
+                $message = $line.Trim().Replace('%','%25')
+                $level = if ($line -match '(?i)\[FAIL\]|error:|LNK[0-9]+') { 'error' } else { 'notice' }
+                Write-Output "::$level title=CAMPUSLINK::$message"
+              }
+            }
+          }
+      - name: Retain artifacts and evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: campuslink-windows-x64
+          path: |
+            Campus Link/dist/releases/
+            Campus Link/dist/packages/
+            Campus Link/logs/build/
+  prepare-release:
+    # Only an explicit release-marker commit from this product branch may write a draft.
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/arena/4ad88df5-campuslink' && contains(github.event.head_commit.message, '[prepare-release]') }}
+    needs: native
+    runs-on: windows-2022
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: campuslink-windows-x64
+          path: candidate
+      - name: Attach the verified ZIP and proofs to a new draft release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $folders = @(Get-ChildItem candidate/dist/releases -Directory)
+          if ($folders.Count -ne 1 -or $folders[0].Name -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw 'Unexpected verified release directory' }
+          $folder = $folders[0]
+          $files = @(Get-ChildItem $folder.FullName -File)
+          $zip = @($files | Where-Object Extension -eq '.zip')
+          if ($zip.Count -ne 1) { throw 'Expected one verified package archive' }
+          foreach ($file in @($zip[0], (Get-Item (Join-Path $folder.FullName 'manifest.json')))) {
+            $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ("$hash  $($file.Name)" -cnotin (Get-Content (Join-Path $folder.FullName 'SHA256SUMS.txt'))) { throw 'Checksums changed after packaging' }
+          }
+          $meta = Get-Content (Join-Path $folder.FullName 'BUILD_INFO.json') -Raw | ConvertFrom-Json
+          if ($meta.commit -ne $env:GITHUB_SHA -or $meta.dirty -or ('v' + $meta.version) -ne $folder.Name) { throw 'Artifact provenance mismatch' }
+          $tags = @(gh api "repos/$env:GH_REPO/tags" --paginate --jq '.[].name')
+          if ($LASTEXITCODE -ne 0 -or $tags -contains $folder.Name) { throw 'Cannot verify version availability or tag already exists' }
+          $versions = @(gh api "repos/$env:GH_REPO/releases" --paginate --jq '.[].tag_name')
+          if ($LASTEXITCODE -ne 0 -or $versions -contains $folder.Name) { throw 'Cannot verify release availability or version already exists' }
+          $assets = @($files.FullName)
+          $logs = @(Get-ChildItem candidate/logs/build -Filter '*.log' -File)
+          if ($logs.Count) {
+            Compress-Archive -LiteralPath $logs.FullName -DestinationPath candidate/windows-ci-logs.zip
+            $assets += (Get-Item candidate/windows-ci-logs.zip).FullName
+          }
+          $notes = Join-Path $folder.FullName 'RELEASE_NOTES.md'
+          Add-Content -LiteralPath $notes -Encoding utf8 -Value "`n[Windows CI and artifact]($env:GITHUB_SERVER_URL/$env:GH_REPO/actions/runs/$env:GITHUB_RUN_ID). Hardware acceptance was not run on the hosted runner."
+          gh release create $folder.Name @assets --draft --prerelease --target $env:GITHUB_SHA --title "CAMPUSLINK $($folder.Name) candidate" --notes-file $notes
+          if ($LASTEXITCODE -ne 0) { throw "Draft release creation returned $LASTEXITCODE" }

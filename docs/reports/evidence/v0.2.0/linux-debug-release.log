@@ -1,0 +1,122 @@
+=== debug Linux host ===
+PASS Healthy
+PASS DHCP pool exhausted
+PASS No DHCP response
+PASS Lease expiry and renewal
+PASS Invalid IP
+PASS Gateway unavailable
+PASS Slow DNS
+PASS DNS unavailable
+PASS Weak signal
+PASS Congestion
+PASS Loss and jitter
+PASS Unstable access
+PASS Logical IP conflict
+PASS No access point
+PASS Association rejected
+PASS Authentication denied
+PASS transition contract
+PASS pool capacity and lease ownership/expiry
+PASS scheduler cancellation and 10k clients
+PASS scenario codec
+PASS capacity profiler budgets
+PASS score bounded, missingness and eligibility
+PASS ranking freshness, cooldown and hysteresis
+PASS scope strict validation
+PASS bounded DNS reply validation
+PASS discovery preserves multiple BSS per SSID; APIPA stays hypothesis
+PASS authorized handoff and post-connect validation
+PASS scope rejection, absent adapter, cancellation make no mutation
+PASS one rollback when endpoint verification fails
+PASS failed connection and failed rollback are bounded and preserve timeout
+PASS distribution and incomplete transfer confidence
+PASS experiment waves enforce explicit permission and device independence
+PASS multi-scope codec, hard caps and comparison identity
+PASS rollback must verify Windows state and gateway policy
+PASS cancellation restores only the captured link when rollback is allowed
+PASS 50k logical clients deterministic completion
+SUMMARY 36 passed, 0 failed
+PASS: SDL 3002030 runtime, dummy window and quit event
+PASS: SDL dummy + ImGui software rendering, all eleven panels and quit event
+LOGICAL_SIMULATION_CAPACITY | limits: 10000 clients, 32 MiB RSS growth budget, 1500 ms wall, 900 ms process CPU
+clients,transitions,events_per_second,wall_ms,cpu_ms,batch_p95_us,baseline_rss,sampled_peak_rss,sampled_growth,accounted_bytes,status
+1,11,380333.3,0.029,0.029,8.120,2318336,2318336,0,372,PASS
+2,22,996692.8,0.022,0.022,7.820,2318336,2318336,0,744,PASS
+4,44,1356810.3,0.032,0.033,18.173,2318336,2318336,0,1488,PASS
+8,88,1359157.3,0.065,0.065,46.690,2318336,2318336,0,2976,PASS
+16,176,1430929.2,0.123,0.123,80.246,2318336,2318336,0,5952,PASS
+32,352,1194050.1,0.295,0.290,128.471,2318336,2318336,0,11904,PASS
+64,704,1287194.2,0.547,0.547,105.855,2318336,2318336,0,23808,PASS
+128,1408,1144106.2,1.231,1.230,143.562,2318336,2318336,0,47616,PASS
+256,2816,908594.6,3.099,3.099,171.225,2318336,2318336,0,95232,PASS
+512,5632,786980.9,7.156,7.103,192.198,2318336,4087808,1769472,190464,PASS
+1024,11264,770159.2,14.626,14.626,199.609,2318336,4083712,1765376,380928,PASS
+2048,22528,718726.1,31.344,31.344,233.071,2318336,4349952,2031616,761856,PASS
+4096,45056,714513.9,63.058,62.950,224.441,2318336,4890624,2572288,1523712,PASS
+8192,90112,601057.7,149.922,149.848,270.020,2318336,5971968,3653632,3047424,PASS
+10000,110000,553212.5,198.839,198.494,284.906,2318336,6602752,4284416,3720000,PASS
+maximum_completed_within_budgets=10000 (offline workload, not radio capacity)
+profile_stop=LIMIT_REACHED
+Usage: CampusLink [--self-test | --ui-smoke | --inventory-smoke | --profile | --graphics-smoke | --clp1-loopback PORT]
+ERROR: SDL_Init(video): nonexistent not available
+=== release Linux host ===
+PASS Healthy
+PASS DHCP pool exhausted
+PASS No DHCP response
+PASS Lease expiry and renewal
+PASS Invalid IP
+PASS Gateway unavailable
+PASS Slow DNS
+PASS DNS unavailable
+PASS Weak signal
+PASS Congestion
+PASS Loss and jitter
+PASS Unstable access
+PASS Logical IP conflict
+PASS No access point
+PASS Association rejected
+PASS Authentication denied
+PASS transition contract
+PASS pool capacity and lease ownership/expiry
+PASS scheduler cancellation and 10k clients
+PASS scenario codec
+PASS capacity profiler budgets
+PASS score bounded, missingness and eligibility
+PASS ranking freshness, cooldown and hysteresis
+PASS scope strict validation
+PASS bounded DNS reply validation
+PASS discovery preserves multiple BSS per SSID; APIPA stays hypothesis
+PASS authorized handoff and post-connect validation
+PASS scope rejection, absent adapter, cancellation make no mutation
+PASS one rollback when endpoint verification fails
+PASS failed connection and failed rollback are bounded and preserve timeout
+PASS distribution and incomplete transfer confidence
+PASS experiment waves enforce explicit permission and device independence
+PASS multi-scope codec, hard caps and comparison identity
+PASS rollback must verify Windows state and gateway policy
+PASS cancellation restores only the captured link when rollback is allowed
+PASS 50k logical clients deterministic completion
+SUMMARY 36 passed, 0 failed
+PASS: SDL 3002030 runtime, dummy window and quit event
+PASS: SDL dummy + ImGui software rendering, all eleven panels and quit event
+LOGICAL_SIMULATION_CAPACITY | limits: 10000 clients, 32 MiB RSS growth budget, 1500 ms wall, 900 ms process CPU
+clients,transitions,events_per_second,wall_ms,cpu_ms,batch_p95_us,baseline_rss,sampled_peak_rss,sampled_growth,accounted_bytes,status
+1,11,553737.7,0.020,0.020,4.741,2306048,2306048,0,372,PASS
+2,22,1827242.5,0.012,0.013,2.788,2306048,2306048,0,744,PASS
+4,44,4068047.3,0.011,0.011,2.402,2306048,2306048,0,1488,PASS
+8,88,5671199.3,0.016,0.015,4.260,2306048,2306048,0,2976,PASS
+16,176,8254385.1,0.021,0.021,6.702,2306048,2306048,0,5952,PASS
+32,352,10572158.0,0.033,0.033,8.015,2306048,2306048,0,11904,PASS
+64,704,10635887.1,0.066,0.066,10.187,2306048,2306048,0,23808,PASS
+128,1408,9643241.2,0.146,0.146,12.620,2306048,2306048,0,47616,PASS
+256,2816,8843998.9,0.318,0.318,13.720,2306048,2306048,0,95232,PASS
+512,5632,8630306.6,0.653,0.652,13.472,2306048,3932160,1626112,190464,PASS
+1024,11264,8798714.6,1.280,1.280,14.414,2306048,3997696,1691648,380928,PASS
+2048,22528,9314922.4,2.418,2.418,13.921,2306048,4263936,1957888,761856,PASS
+4096,45056,8816329.2,5.111,5.110,16.312,2306048,4804608,2498560,1523712,PASS
+8192,90112,7023593.9,12.830,12.780,22.080,2306048,5885952,3579904,3047424,PASS
+10000,110000,7081001.8,15.535,15.014,28.383,2306048,6516736,4210688,3720000,PASS
+maximum_completed_within_budgets=10000 (offline workload, not radio capacity)
+profile_stop=LIMIT_REACHED
+Usage: CampusLink [--self-test | --ui-smoke | --inventory-smoke | --profile | --graphics-smoke | --clp1-loopback PORT]
+ERROR: SDL_Init(video): nonexistent not available

@@ -1,0 +1,29 @@
+{
+  "sdl3": {
+    "version": "3.2.30",
+    "tag": "release-3.2.30",
+    "commit": "f5e5f6588921eed3d7d048ce43d9eb1ff0da0ffc",
+    "windowsVcUrl": "https://github.com/libsdl-org/SDL/releases/download/release-3.2.30/SDL3-devel-3.2.30-VC.zip",
+    "windowsVcSha256": "3a93c2182ddaf64692a8907928e6a54467f0f7c1caddf3019cfa69fbf1dfe3f2",
+    "sourceUrl": "https://codeload.github.com/libsdl-org/SDL/tar.gz/refs/tags/release-3.2.30",
+    "sourceSha256": "8bfb8f70a72f216dff66cde64b9d7b863d5e8aa46be7f2fd400d7f1f9baafe76",
+    "license": "Zlib",
+    "architecture": "Windows x64 (VC)"
+  },
+  "imgui": {
+    "version": "1.92.5",
+    "tag": "v1.92.5",
+    "commit": "6d910d5487d11ca567b61c7824b0c78c569d62f0",
+    "sourceUrl": "https://codeload.github.com/ocornut/imgui/tar.gz/refs/tags/v1.92.5",
+    "sourceSha256": "0eb50fe9aeba1a51f96b5843c7f630a32ed2e9362d693c61b87e4fa870cf826d",
+    "license": "MIT",
+    "architecture": "source"
+  },
+  "llvm": {
+    "version": "20.1.8",
+    "architecture": "Windows x64",
+    "license": "Apache-2.0 WITH LLVM-exception",
+    "windowsInstallerUrl": "https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/LLVM-20.1.8-win64.exe",
+    "windowsInstallerSha256": "3197846a2b19063687dd56e93e34cd941e3548d907f23a6131571321bdf9fe7b"
+  }
+}

@@ -1,0 +1,24 @@
+# Changelog
+
+## 0.2.1 — Validation and lab operability
+
+- Assisted handoff requires a host-validated result on the same interface. The latest failed measurement supersedes older successful measurements for that interface, BSSID and method.
+- Browse all completed logical clients in pages, inspect individual histories and replay a new in-place DHCP renewal scenario without restarting discovery.
+- Expose current PHY, the 802.11 interface type, 802.11d, frame-protection and legacy Hosted Network reports without treating them as simultaneous STA evidence.
+- Include network diagnostics in the portable guide and enforce the required operator-kit files during verification.
+
+## 0.2.0 — Product completion candidate
+
+- Native radio evidence now distinguishes vendor documentation, driver reports, active OS associations and validated trial windows. Secondary STA returns a native result, not an inferred ceiling.
+- Progressive capacity profiling samples process RSS and names the stop cause (`LIMIT_REACHED`, budget or cancellation). Lab models offer ownership, ACK lease start and DHCP retry backoff; logical histories can be inspected and cleared.
+- Explicit authorized batches serialize candidates unless distinct physical PnP devices and endpoints permit parallel waves. Handoff verifies stable Windows IPv4 and confirms rollback state.
+- CLP1 tests multiple sizes and paced repetitions, with stabilization, RTT distribution, DNS timing, per-size statistics and sample sufficiency. The score and assisted selection compare matching methods only.
+- Eleven-panel render smoke, opt-in native Vulkan smoke, portable Windows 11 acceptance tooling, CI packaging verification and versioned draft-release preparation.
+
+## 0.1.0 — Candidate
+
+- SDL3 + Dear ImGui desktop with Vulkan-first SDL GPU and software fallback.
+- Offline logical clients, DHCP simulator, scenario replay/CSV, deterministic scenarios and a measured CPU/wall-time capacity profiler.
+- Windows-native inventory, WLAN scan and operator-authorized handoff with post-switch IPv4 and controlled endpoint checks and optional rollback.
+- Bounded ICMP and CLP1 metrics with confidence-aware ranking.
+- Direct Debug/Release compilation, unit/smoke tests and verified portable ZIP/local release commands. See the delivery report for the execution status of each gate.

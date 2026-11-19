@@ -1,0 +1,108 @@
+=== debug Linux host ===
+PASS Healthy
+PASS DHCP pool exhausted
+PASS No DHCP response
+PASS Lease expiry and renewal
+PASS Invalid IP
+PASS Gateway unavailable
+PASS Slow DNS
+PASS DNS unavailable
+PASS Weak signal
+PASS Congestion
+PASS Loss and jitter
+PASS Unstable access
+PASS Logical IP conflict
+PASS No access point
+PASS Association rejected
+PASS Authentication denied
+PASS transition contract
+PASS pool capacity and lease ownership/expiry
+PASS scheduler cancellation and 10k clients
+PASS scenario codec
+PASS capacity profiler budgets
+PASS score bounded, missingness and eligibility
+PASS ranking freshness, cooldown and hysteresis
+PASS scope strict validation
+PASS bounded DNS reply validation
+PASS discovery preserves multiple BSS per SSID; APIPA stays hypothesis
+PASS authorized handoff and post-connect validation
+PASS scope rejection, absent adapter, cancellation make no mutation
+PASS one rollback when endpoint verification fails
+PASS failed connection and failed rollback are bounded and preserve timeout
+SUMMARY 30 passed, 0 failed
+PASS: SDL 3002030 runtime, dummy window and quit event
+PASS: SDL dummy + ImGui software rendering, three frames and quit event
+LOGICAL_SIMULATION_CAPACITY | limits: 10000 clients, 32 MiB accounted, 1500 ms wall, 900 ms process CPU
+clients,transitions,events_per_second,wall_ms,cpu_ms,batch_p95_us,accounted_bytes,status
+1,11,493052.4,0.022,0.022,7.813,364,PASS
+2,22,507356.7,0.043,0.044,8.270,728,PASS
+4,44,1688540.9,0.026,0.026,17.947,1456,PASS
+8,88,1480658.9,0.059,0.060,49.245,2912,PASS
+16,176,1694817.3,0.104,0.104,23.626,5824,PASS
+32,352,1391986.6,0.253,0.253,90.830,11648,PASS
+64,704,1304305.1,0.540,0.540,99.833,23296,PASS
+128,1408,1150873.1,1.223,1.223,112.897,46592,PASS
+256,2816,1003378.2,2.807,2.802,140.099,93184,PASS
+512,5632,894469.7,6.296,6.269,170.040,186368,PASS
+1024,11264,885534.2,12.720,12.720,163.381,372736,PASS
+2048,22528,823887.9,27.344,27.343,177.985,745472,PASS
+4096,45056,692756.0,65.039,65.039,225.194,1490944,PASS
+8192,90112,675806.0,133.340,133.328,234.498,2981888,PASS
+10000,110000,653853.8,168.233,163.694,219.366,3640000,PASS
+maximum_completed_within_budgets=10000 (offline workload, not radio capacity)
+Usage: CampusLink [--self-test | --ui-smoke | --inventory-smoke | --profile]
+ERROR: SDL_Init(video): nonexistent not available
+=== release Linux host ===
+PASS Healthy
+PASS DHCP pool exhausted
+PASS No DHCP response
+PASS Lease expiry and renewal
+PASS Invalid IP
+PASS Gateway unavailable
+PASS Slow DNS
+PASS DNS unavailable
+PASS Weak signal
+PASS Congestion
+PASS Loss and jitter
+PASS Unstable access
+PASS Logical IP conflict
+PASS No access point
+PASS Association rejected
+PASS Authentication denied
+PASS transition contract
+PASS pool capacity and lease ownership/expiry
+PASS scheduler cancellation and 10k clients
+PASS scenario codec
+PASS capacity profiler budgets
+PASS score bounded, missingness and eligibility
+PASS ranking freshness, cooldown and hysteresis
+PASS scope strict validation
+PASS bounded DNS reply validation
+PASS discovery preserves multiple BSS per SSID; APIPA stays hypothesis
+PASS authorized handoff and post-connect validation
+PASS scope rejection, absent adapter, cancellation make no mutation
+PASS one rollback when endpoint verification fails
+PASS failed connection and failed rollback are bounded and preserve timeout
+SUMMARY 30 passed, 0 failed
+PASS: SDL 3002030 runtime, dummy window and quit event
+PASS: SDL dummy + ImGui software rendering, three frames and quit event
+LOGICAL_SIMULATION_CAPACITY | limits: 10000 clients, 32 MiB accounted, 1500 ms wall, 900 ms process CPU
+clients,transitions,events_per_second,wall_ms,cpu_ms,batch_p95_us,accounted_bytes,status
+1,11,898179.1,0.012,0.012,5.067,364,PASS
+2,22,3804911.8,0.006,0.006,3.095,728,PASS
+4,44,9136212.6,0.005,0.004,2.623,1456,PASS
+8,88,11144883.5,0.008,0.008,4.551,2912,PASS
+16,176,12505329.0,0.014,0.014,3.519,5824,PASS
+32,352,13687444.1,0.026,0.025,7.645,11648,PASS
+64,704,12628482.3,0.056,0.056,9.480,23296,PASS
+128,1408,10828853.4,0.130,0.130,10.884,46592,PASS
+256,2816,10726434.0,0.263,0.263,12.061,93184,PASS
+512,5632,10634481.2,0.530,0.530,12.662,186368,PASS
+1024,11264,9562537.7,1.178,1.178,14.039,372736,PASS
+2048,22528,9248171.4,2.436,2.436,15.106,745472,PASS
+4096,45056,8815477.0,5.111,5.111,15.985,1490944,PASS
+8192,90112,7954739.1,11.328,11.288,18.416,2981888,PASS
+10000,110000,6699333.0,16.420,16.419,22.869,3640000,PASS
+maximum_completed_within_budgets=10000 (offline workload, not radio capacity)
+Usage: CampusLink [--self-test | --ui-smoke | --inventory-smoke | --profile]
+ERROR: SDL_Init(video): nonexistent not available
