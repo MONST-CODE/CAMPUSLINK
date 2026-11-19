@@ -9,3 +9,7 @@ Portable output: `dist/packages/CAMPUSLINK-<VERSION>-windows-x64-portable.zip` p
 ## Candidate release publication
 
 The Windows job verifies the extracted ZIP and manifests before uploading its artifact. An explicitly marked release-preparation commit on the candidate branch can attach that same run's verified outputs to a **new draft** release. It refuses an existing release or tag and checks that the package was built from the exact clean commit. This does not publish or accept the candidate: the draft and hardware evidence must be reviewed before publishing. Preserve the package/version and historical evidence if another candidate is required.
+
+### Bilingual desktop packages (0.3.0+)
+
+Inter and JetBrains Mono are pinned to the upstream byte digests in `deps.lock`. The staged `assets/fonts/` directory is resolved from the executable path, not the caller’s current directory. The package includes both OFL notices under `LICENSES/`. The ZIP writer explicitly names entries with `/` and both writer and verifier reject `\` in a 0.3.0+ archive. The extracted smoke checks `--version` against `VERSION` and the actual Git commit, then renders in both languages and themes from a directory with spaces. The localization catalog is compiled into the executable; there is no external translation file to configure.

@@ -1,0 +1,7 @@
+{"annotation_level":"warning","message":"Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@v4, actions/upload-artifact@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/","title":""}
+{"annotation_level":"failure","message":"[FAIL] Unable to find type [IO.Compression.ZipArchiveMode].","title":"CAMPUSLINK"}
+{"annotation_level":"failure","message":"[FAIL] 0.63s | exit 1 | Unable to find type [IO.Compression.ZipArchiveMode].","title":"CAMPUSLINK"}
+{"annotation_level":"notice","message":"maximum_completed_within_budgets=10000 (offline workload, not radio capacity)","title":"CAMPUSLINK"}
+{"annotation_level":"notice","message":"Native inventory: 18 interfaces, 1 diagnostics","title":"CAMPUSLINK"}
+{"annotation_level":"notice","message":"SUMMARY 40 passed, 0 failed","title":"CAMPUSLINK"}
+{"annotation_level":"failure","message":"Process completed with exit code 1.","title":""}
