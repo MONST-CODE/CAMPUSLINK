@@ -67,6 +67,12 @@ int main() {
             while (!b.done()) b.step(128);
             require(a.csv() == b.csv(), "deterministic replay across batch sizes");
             require(std::any_of(a.clients().begin(), a.clients().end(), [&](const auto& c) { return c.state == expected; }), "expected terminal state");
+            if (s == Scenario::healthy) {
+                const auto& c = a.clients().front();
+                auto seen = [&](State state) { return std::any_of(c.history.begin(), c.history.begin() + c.history_size, [&](const auto& e) { return e.state == state; }); };
+                require(seen(State::dhcp_offer) && seen(State::dhcp_request) && seen(State::dhcp_ack), "DHCP transition sequence missing");
+            }
+            if (s == Scenario::weak_signal) require(a.clients().front().metrics.rssi_dbm < -70, "signal scenario did not affect RSSI");
             if (s == Scenario::expire) require(a.clients().front().leases == 2, "lease renewed");
             if (s == Scenario::slow_dns) require(a.now() >= 300, "DNS delay");
             if (s == Scenario::jitter) require(a.clients().front().metrics.jitter_ms > 10, "jitter not observed");

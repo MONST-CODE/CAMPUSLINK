@@ -12,7 +12,7 @@
 namespace campuslink::sim {
 enum class Scenario { healthy, pool, no_dhcp, expire, bad_ip, no_gateway, slow_dns, no_dns,
     weak_signal, congestion, jitter, unstable, conflict, no_ap, rejected, auth_denied, count };
-enum class State { created, discovery, association, authentication, dhcp, configured, gateway, dns,
+enum class State { created, discovery, association, authentication, dhcp, dhcp_offer, dhcp_request, dhcp_ack, configured, gateway, dns,
     online, interrupted, no_ap, rejected, auth_denied, no_dhcp, exhausted, conflict, bad_ip,
     no_gateway, no_dns, cancelled, count };
 std::string_view name(State);
@@ -27,14 +27,14 @@ struct Config {
 std::string serialize(const Config&);
 Config parse(std::string_view);
 struct Event { unsigned at_ms; State state; };
-struct Metrics { float latency_ms{}, jitter_ms{}, loss_percent{}, down_mbps{}, up_mbps{}; };
+struct Metrics { float latency_ms{}, jitter_ms{}, loss_percent{}, down_mbps{}, up_mbps{}, rssi_dbm{}; };
 struct Client {
     unsigned id{};
     State state{State::created};
     unsigned slot{}; // logical pool index; never a host address
     unsigned leases{};
     Metrics metrics;
-    std::array<Event, 16> history{};
+    std::array<Event, 24> history{};
     unsigned history_size{};
 };
 class DhcpSimulator {

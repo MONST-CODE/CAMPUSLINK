@@ -15,13 +15,23 @@ $encoding = [Text.UTF8Encoding]::new($false)
 function Write-Utf8([string]$Path, [string]$Text) { [IO.File]::WriteAllText($Path, $Text, $encoding) }
 function Hash([string]$File) { (Get-FileHash -LiteralPath $File -Algorithm SHA256).Hash.ToLowerInvariant() }
 function Run-Extracted([string]$Exe, [string]$TestName) {
-    $stdout = Join-Path $temp ($TestName + '-stdout.txt')
-    $stderr = Join-Path $temp ($TestName + '-stderr.txt')
-    $p = Start-Process -FilePath $Exe -ArgumentList @($TestName) -WorkingDirectory $extract -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $Exe
+    $start.Arguments = $TestName
+    $start.WorkingDirectory = $extract
+    $start.UseShellExecute = $false
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $p = [Diagnostics.Process]::Start($start)
+    if (-not $p) { throw "Could not start extracted executable: $TestName" }
     try {
+        $stdout = $p.StandardOutput.ReadToEndAsync()
+        $stderr = $p.StandardError.ReadToEndAsync()
         if (-not $p.WaitForExit(20000)) { $p.Kill(); $p.WaitForExit(); throw "Extracted smoke test $TestName timed out" }
-        Get-Content -LiteralPath @($stdout, $stderr)
-        if ($p.ExitCode -ne 0) { throw "Extracted smoke test $TestName failed: $($p.ExitCode)" }
+        $code = $p.ExitCode
+        $stdout.GetAwaiter().GetResult().Trim()
+        $stderr.GetAwaiter().GetResult().Trim()
+        if ($code -ne 0) { throw "Extracted smoke test $TestName failed: $code" }
     } finally { $p.Dispose() }
 }
 [void][IO.Directory]::CreateDirectory($stage)
@@ -49,8 +59,9 @@ try {
     $dumpbin = Join-Path $env:VCToolsInstallDir 'bin\Hostx64\x64\dumpbin.exe'
     $depLines = @(foreach ($file in @('CampusLink.exe','SDL3.dll')) {
         $file
-        & $dumpbin /NOLOGO /DEPENDENTS (Join-Path $stage $file)
+        $dump = @(& $dumpbin /NOLOGO /DEPENDENTS (Join-Path $stage $file))
         if ($LASTEXITCODE -ne 0) { throw "dumpbin /DEPENDENTS failed for $file" }
+        $dump | ForEach-Object { $_.Replace($stage + '\', '') }
     })
     Write-Utf8 (Join-Path $stage 'RUNTIME_IMPORTS.txt') (($depLines -join "`n") + "`n")
     $versionLines = @(& $Compiler --version)

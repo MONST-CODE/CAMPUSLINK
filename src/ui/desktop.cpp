@@ -369,13 +369,14 @@ struct Screen {
             ImGui::EndDisabled();
             ImGui::Text("%u clients | %u transitions | simulated time %u ms", view.client_count, view.events, view.simulated_ms);
             for (unsigned j = 0; j < view.counts.size(); ++j) if (view.counts[j]) { ImGui::Text("%s: %u", sim::name(static_cast<sim::State>(j)).data(), view.counts[j]); }
-            if (ImGui::BeginTable("clients", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
-                for (const auto* h : {"Logical ID", "State", "Lease count", "Latency (sim. ms)", "Loss (sim. %)"}) ImGui::TableSetupColumn(h);
+            if (ImGui::BeginTable("clients", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+                for (const auto* h : {"Logical ID", "State", "Lease count", "Latency (sim. ms)", "Loss (sim. %)", "RSSI (sim. dBm)"}) ImGui::TableSetupColumn(h);
                 ImGui::TableHeadersRow();
                 for (const auto& c : view.clients) {
                     ImGui::TableNextRow(); ImGui::TableNextColumn(); ImGui::Text("%u", c.id); ImGui::TableNextColumn(); text(sim::name(c.state));
                     ImGui::TableNextColumn(); ImGui::Text("%u", c.leases); ImGui::TableNextColumn(); ImGui::Text("%.1f", c.metrics.latency_ms);
-                    ImGui::TableNextColumn(); ImGui::Text("%.1f", c.metrics.loss_percent);
+                    ImGui::TableNextColumn(); ImGui::Text("%.1f", c.metrics.loss_percent); ImGui::TableNextColumn();
+                    if (c.metrics.rssi_dbm < 0) ImGui::Text("%.0f", c.metrics.rssi_dbm); else text("N/A");
                 }
                 ImGui::EndTable();
             }

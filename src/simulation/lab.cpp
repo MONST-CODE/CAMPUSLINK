@@ -21,7 +21,7 @@ using namespace std::literals;
 constexpr std::array scenarios{"Healthy"sv,"DHCP pool exhausted"sv,"No DHCP response"sv,"Lease expiry and renewal"sv,
     "Invalid IP"sv,"Gateway unavailable"sv,"Slow DNS"sv,"DNS unavailable"sv,"Weak signal"sv,"Congestion"sv,
     "Loss and jitter"sv,"Unstable access"sv,"Logical IP conflict"sv,"No access point"sv,"Association rejected"sv,"Authentication denied"sv};
-constexpr std::array states{"CREATED"sv,"DISCOVERY"sv,"ASSOCIATION"sv,"AUTHENTICATION"sv,"DHCP"sv,"CONFIGURED"sv,
+constexpr std::array states{"CREATED"sv,"DISCOVERY"sv,"ASSOCIATION"sv,"AUTHENTICATION"sv,"DHCP_DISCOVER"sv,"DHCP_OFFER"sv,"DHCP_REQUEST"sv,"DHCP_ACK"sv,"CONFIGURED"sv,
     "GATEWAY"sv,"DNS"sv,"ONLINE"sv,"INTERRUPTED"sv,"NO_AP"sv,"ASSOCIATION_REJECTED"sv,"AUTH_DENIED"sv,
     "DHCP_TIMEOUT"sv,"DHCP_EXHAUSTED"sv,"LOGICAL_CONFLICT"sv,"INVALID_IP"sv,"NO_GATEWAY"sv,"NO_DNS"sv,"CANCELLED"sv};
 Config checked(Config c) {
@@ -48,7 +48,10 @@ bool can_transition(State from, State to) {
     case State::discovery: return to == State::association || to == State::no_ap;
     case State::association: return to == State::authentication || to == State::rejected;
     case State::authentication: return to == State::dhcp || to == State::auth_denied;
-    case State::dhcp: return to == State::configured || to == State::no_dhcp || to == State::exhausted || to == State::conflict;
+    case State::dhcp: return to == State::dhcp_offer || to == State::no_dhcp || to == State::exhausted;
+    case State::dhcp_offer: return to == State::dhcp_request;
+    case State::dhcp_request: return to == State::dhcp_ack || to == State::conflict;
+    case State::dhcp_ack: return to == State::configured;
     case State::configured: return to == State::gateway || to == State::bad_ip;
     case State::gateway: return to == State::dns || to == State::no_gateway;
     case State::dns: return to == State::online || to == State::no_dns;
@@ -125,18 +128,24 @@ void Lab::update(unsigned index) {
     case State::authentication: if (s == Scenario::auth_denied) fail(State::auth_denied); else next(State::dhcp, s == Scenario::no_dhcp ? 100 : 4); break;
     case State::dhcp:
         if (s == Scenario::no_dhcp) fail(State::no_dhcp);
-        else if (s == Scenario::conflict && c.id % 2 == 0) fail(State::conflict);
         else if (!(c.slot = dhcp_.acquire(c.id, now_, config_.lease_ms))) fail(State::exhausted);
-        else { ++c.leases; next(State::configured); }
+        else next(State::dhcp_offer);
         break;
+    case State::dhcp_offer: next(State::dhcp_request); break;
+    case State::dhcp_request:
+        if (s == Scenario::conflict && c.id % 2 == 0) fail(State::conflict);
+        else { ++c.leases; next(State::dhcp_ack); }
+        break;
+    case State::dhcp_ack: next(State::configured); break;
     case State::configured: if (s == Scenario::bad_ip) fail(State::bad_ip); else next(State::gateway); break;
     case State::gateway: if (s == Scenario::no_gateway) fail(State::no_gateway); else next(State::dns, s == Scenario::slow_dns ? 300 : 4); break;
     case State::dns:
         if (s == Scenario::no_dns) { fail(State::no_dns); break; }
-        c.metrics = {float(7 + rng_() % 17), float(1 + rng_() % 4), 0, float(40 + rng_() % 100), float(20 + rng_() % 40)};
-        if (s == Scenario::weak_signal || s == Scenario::congestion || s == Scenario::jitter || s == Scenario::unstable) {
-            c.metrics.latency_ms += 80; c.metrics.loss_percent = float(5 + rng_() % 25);
-            c.metrics.jitter_ms += 30; c.metrics.down_mbps /= 8; c.metrics.up_mbps /= 4;
+        c.metrics = {float(7 + rng_() % 17), float(1 + rng_() % 4), 0, float(40 + rng_() % 100), float(20 + rng_() % 40), -float(45 + rng_() % 20)};
+        if (s == Scenario::weak_signal) { c.metrics.rssi_dbm = -float(78 + rng_() % 14); c.metrics.loss_percent = 8; c.metrics.down_mbps /= 3; }
+        if (s == Scenario::congestion) { c.metrics.latency_ms += 100; c.metrics.jitter_ms += 12; c.metrics.down_mbps /= 8; c.metrics.up_mbps /= 4; }
+        if (s == Scenario::jitter || s == Scenario::unstable) {
+            c.metrics.latency_ms += 35; c.metrics.loss_percent = float(5 + rng_() % 25); c.metrics.jitter_ms += 30;
         }
         if (s == Scenario::expire && c.leases == 1) next(State::online, config_.lease_ms);
         else if (s == Scenario::unstable) next(State::online, 60);
@@ -169,13 +178,13 @@ void Lab::cancel() {
 std::string Lab::csv() const {
     std::ostringstream out;
     out.imbue(std::locale::classic());
-    out << serialize(config_) << "\nsource,client,simulated_ms,state,leases,latency_ms,jitter_ms,loss_percent,down_mbps,up_mbps\n";
+    out << serialize(config_) << "\nsource,client,simulated_ms,state,leases,latency_ms,jitter_ms,loss_percent,down_mbps,up_mbps,rssi_dbm\n";
     for (const auto& c : clients_) {
         for (unsigned i = 0; i < c.history_size; ++i) {
             const auto m = (i + 1 == c.history_size) ? c.metrics : Metrics{};
             out << "SIMULATED," << c.id << ',' << c.history[i].at_ms << ',' << name(c.history[i].state) << ','
                 << (i + 1 == c.history_size ? c.leases : 0) << ',' << m.latency_ms << ',' << m.jitter_ms << ','
-                << m.loss_percent << ',' << m.down_mbps << ',' << m.up_mbps << '\n';
+                << m.loss_percent << ',' << m.down_mbps << ',' << m.up_mbps << ',' << m.rssi_dbm << '\n';
         }
     }
     return out.str();
