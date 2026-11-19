@@ -308,7 +308,7 @@ std::optional<std::pair<double,double>> transfer(const Interface& i, const Scope
     if (s == INVALID_SOCKET) return {};
     const DWORD index = htonl(i.index);
     u_long nonblocking = 1;
-    if (setsockopt(s, IPPROTO_IP, IP_UNICAST_IF, reinterpret_cast<const char*>(&index), sizeof index) ||
+    if ((i.index && setsockopt(s, IPPROTO_IP, IP_UNICAST_IF, reinterpret_cast<const char*>(&index), sizeof index)) ||
         ioctlsocket(s, FIONBIO, &nonblocking) || bind(s, reinterpret_cast<const sockaddr*>(&source), sizeof source)) return {};
     const auto deadline = Clock::now() + std::chrono::milliseconds(scope.timeout_ms);
     if (::connect(s, reinterpret_cast<const sockaddr*>(&target), sizeof target)) {
@@ -529,4 +529,21 @@ public:
 };
 }
 Backend& platform() { static Windows backend; return backend; }
+std::optional<Error> loopback_protocol(unsigned port) {
+    if (!port || port > 65535) return fail("CLP1 loopback port", ERROR_INVALID_PARAMETER);
+    const Winsock wsa;
+    if (wsa.code) return fail("WSAStartup", static_cast<DWORD>(wsa.code));
+    // Explicit test path only: both addresses are fixed to loopback; it cannot reach a selected network.
+    sockaddr_in source{}, target{};
+    source.sin_family = target.sin_family = AF_INET;
+    source.sin_addr.S_un.S_addr = target.sin_addr.S_un.S_addr = htonl(INADDR_LOOPBACK);
+    target.sin_port = htons(static_cast<u_short>(port));
+    Scope scope; scope.timeout_ms = 2000;
+    const Interface local;
+    for (const auto size : {1024u, 16384u, 65536u}) {
+        const auto result = transfer(local, scope, size, source, target, {});
+        if (!result || result->first <= 0 || result->second <= 0) return fail("CLP1 fixed loopback exchange", ERROR_INVALID_DATA);
+    }
+    return {};
+}
 }

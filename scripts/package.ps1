@@ -60,6 +60,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $Root 'third_party\imgui\LICENSE.txt') -Destination (Join-Path $licenses 'Dear-ImGui.txt')
     Copy-Item -LiteralPath (Join-Path $Root 'docs\USER_GUIDE.md') -Destination (Join-Path $stage 'USER_GUIDE.md')
     Copy-Item -LiteralPath (Join-Path $Root 'docs\BUILD_RELEASE.md') -Destination (Join-Path $stage 'BUILD_RELEASE.md')
+    Copy-Item -LiteralPath (Join-Path $Root 'docs\WINDOWS11_VALIDATION.md') -Destination $stage
     $commit = & git.exe -C $Root rev-parse HEAD
     if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve Git commit' }
     $changes = @(& git.exe -C $Root status --porcelain)

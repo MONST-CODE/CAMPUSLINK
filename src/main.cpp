@@ -6,6 +6,7 @@
 #include "campuslink/simulation.hpp"
 
 #include <cstdio>
+#include <charconv>
 #include <memory>
 #include <string_view>
 
@@ -114,6 +115,16 @@ int main(int argc, char* argv[]) {
             std::fprintf(stderr, "Profiler: %s\n", e.what()); return 1;
         }
     }
+    if (argc == 3 && std::string_view{argv[1]} == "--clp1-loopback") {
+        const std::string_view text(argv[2]);
+        unsigned port{};
+        const auto converted = std::from_chars(text.data(), text.data() + text.size(), port);
+        if (converted.ec != std::errc{} || converted.ptr != text.data() + text.size() || !port || port > 65535) return 2;
+        if (const auto result = campuslink::net::loopback_protocol(port)) {
+            std::fprintf(stderr, "%s: %u (%s)\n", result->operation.c_str(), result->code, result->detail.c_str()); return 1;
+        }
+        std::puts("PASS: native Winsock CLP1 client round trips for 1, 16 and 64 KiB"); return 0;
+    }
     if (argc == 2 && std::string_view{argv[1]} == "--inventory-smoke") {
 #ifdef _WIN32
         const auto snapshot = campuslink::net::platform().inspect({});
@@ -126,7 +137,7 @@ int main(int argc, char* argv[]) {
 #endif
     }
     if (argc != 1 && !self_test && !ui_test && !graphics) {
-        std::fputs("Usage: CampusLink [--self-test | --ui-smoke | --inventory-smoke | --profile | --graphics-smoke]\n", stderr);
+        std::fputs("Usage: CampusLink [--self-test | --ui-smoke | --inventory-smoke | --profile | --graphics-smoke | --clp1-loopback PORT]\n", stderr);
         return 2;
     }
     const int result = self_test ? run(true) : campuslink::ui::run(ui_test || graphics, graphics);

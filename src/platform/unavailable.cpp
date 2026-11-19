@@ -11,4 +11,5 @@ struct Unavailable final : Backend {
 };
 }
 Backend& platform() { static Unavailable backend; return backend; }
+std::optional<Error> loopback_protocol(unsigned) { return Error{"CLP1", 0, "Windows protocol client unavailable"}; }
 }

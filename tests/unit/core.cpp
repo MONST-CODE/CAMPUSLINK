@@ -33,6 +33,7 @@ struct Mock final : net::Backend {
     net::Interface interface;
     bool absent{}, failure{}, connect_fail{}, rollback_fail{}, rollback_wrong_route{};
     unsigned connections{}, scans{}, probes{};
+    std::stop_source* cancel_in_measure{};
     Mock() {
         interface.id = "wifi0"; interface.up = interface.associated = interface.wireless = true; interface.kind = "Physical (reported)";
         interface.profile = "Previous"; interface.bssid = "02:00:00:00:00:01";
@@ -40,7 +41,8 @@ struct Mock final : net::Backend {
     }
     net::Snapshot inspect(std::stop_token) override { return absent ? net::Snapshot{} : net::Snapshot{{interface}, {}}; }
     net::Discovery scan(std::stop_token) override { ++scans; auto second = target; second.bssid.back() = '3'; return {{target, second}, {}}; }
-    std::optional<net::Error> connect(const net::Bss& b, std::stop_token) override {
+    std::optional<net::Error> connect(const net::Bss& b, std::stop_token stop) override {
+        require(!stop.stop_requested(), "cleanup received a cancelled token");
         ++connections;
         if ((connect_fail && connections == 1) || (rollback_fail && connections == 2)) return net::Error{"connect", 1460, "Synthetic timeout"};
         interface.profile = b.profile; interface.bssid = b.bssid;
@@ -48,7 +50,8 @@ struct Mock final : net::Backend {
         return {};
     }
     net::Observation measure(const net::Interface&, const net::Scope&, std::stop_token) override {
-        ++probes; auto o = good(); o.endpoint_verified = !failure; return o;
+        ++probes; if (cancel_in_measure) cancel_in_measure->request_stop();
+        auto o = good(); o.endpoint_verified = !failure; return o;
     }
 };
 }
@@ -213,6 +216,18 @@ int main() {
         const auto h = net::select(mock, scope, target, {});
         require(!h.rolled_back && h.state == "ROLLBACK_UNVERIFIED" && mock.connections == 2, "rollback reported verified without a route");
         require(!net::usable_ipv4("169.254.22.3") && !net::usable_ipv4("224.0.0.1") && net::usable_ipv4("192.0.2.1"), "IPv4 validator admitted unusable address");
+    });
+    check("cancellation restores only the captured link when rollback is allowed", [] {
+        for (const bool rollback : {false, true}) {
+            Mock mock;
+            auto stop = std::make_unique<std::stop_source>(); mock.cancel_in_measure = stop.get();
+            auto scope = net::parse_scope(scope_text); scope.rollback = rollback;
+            const auto h = net::select(mock, scope, target, stop->get_token());
+            require(h.state == (rollback ? "CANCELLED_ROLLED_BACK" : "CANCELLED_HOST_STATE_UNVERIFIED") && h.rolled_back == rollback,
+                "cancellation outcome did not report restoration policy");
+            require(mock.probes == 1 && mock.connections == (rollback ? 2u : 1u) &&
+                mock.interface.profile == (rollback ? "Previous" : "Authorized lab"), "unexpected probe or host mutation during restoration");
+        }
     });
     check("50k logical clients deterministic completion", [] {
         sim::Lab lab({50000, 50000, 250, 42, Scenario::healthy});

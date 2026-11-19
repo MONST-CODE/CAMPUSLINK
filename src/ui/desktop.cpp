@@ -177,9 +177,9 @@ public:
                     update([](View& v) { ++v.overlapping_validated_windows; });
                 if (unsafe_state) break;
             }
-            hardware = net::platform().inspect(stop);
+            if (!stop.stop_requested()) hardware = net::platform().inspect(stop);
             update([&](View& v) {
-                v.hardware = std::move(hardware);
+                if (!stop.stop_requested()) v.hardware = std::move(hardware);
                 v.status = "Physical results: " + std::to_string(v.outcomes.size()) + " / " + std::to_string(requested.size()) + " completed; review each outcome";
             });
         });

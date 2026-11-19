@@ -20,3 +20,7 @@ Build logs are under `logs/build/`. The portable ZIP is written to `dist/package
 Start with **Virtual Client Lab** for deterministic offline scenarios. **Hardware Lab** and **Network Discovery** report driver data and unknowns explicitly. To run a real experiment, read the [user guide](docs/USER_GUIDE.md) and configure an authorized private CLP1 endpoint and Windows profile. Vulkan is preferred; SDL software rendering is used if unavailable.
 
 [Architecture](docs/ARCHITECTURE.md) · [Test plan](docs/TEST_PLAN.md) · [Known limitations](docs/KNOWN_LIMITATIONS.md) · [Delivery evidence](docs/reports/FINAL_DELIVERY_REPORT.md) · [Original specification](docs/CAMPUSLINK_SPEC_ARENA.md)
+
+### Candidate 0.2.0
+
+The portable package targets Windows 11 x64. The integrated Lab runs offline; its client count and RSS measurements describe simulation only. Physical trials require exact profile/BSSID and an authorized endpoint. See [Windows 11 acceptance](docs/WINDOWS11_VALIDATION.md) for client, Dell/AX201, Vulkan and WLAN field checks; Windows Server CI does not replace those checks.

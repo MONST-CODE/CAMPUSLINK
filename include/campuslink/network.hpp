@@ -100,4 +100,5 @@ struct Backend {
 struct Handoff { std::string state; bool rolled_back{}; std::optional<Error> error; std::optional<Candidate> measured; };
 Handoff select(Backend&, const Scope&, const Bss&, std::stop_token);
 Backend& platform();
+std::optional<Error> loopback_protocol(unsigned port);
 }

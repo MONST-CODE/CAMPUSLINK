@@ -196,27 +196,30 @@ Handoff select(Backend& backend, const Scope& scope, const Bss& candidate, std::
             else if (!scope.dns_name.empty() && !measured->observation.dns_ms) failure = Error{"validation", 0, "Configured DNS name was not verified on the WLAN resolver"};
         }
     }
-    if (stop.stop_requested()) return {"CANCELLED", false, std::move(failure), std::move(measured)};
-    if (!failure) return {"HOST_VALIDATED", false, {}, std::move(measured)};
+    const bool cancelled = stop.stop_requested();
+    if (!failure && !cancelled) return {"HOST_VALIDATED", false, {}, std::move(measured)};
+    if (cancelled && !failure) failure = Error{"handoff", 0, "Operator cancelled the experiment"};
+    // Cleanup is a single bounded native connection attempt. Cancellation stops all probes
+    // and new trials, but does not interrupt restoration of this interface's captured profile.
     if (changing && scope.rollback && previous.associated && !previous.profile.empty() && usable_ipv4(previous.address)) {
         const Bss rollback{previous.id, previous.ssid, previous.bssid, {}, previous.profile};
-        if (const auto rollback_error = backend.connect(rollback, stop)) {
+        if (const auto rollback_error = backend.connect(rollback, {})) {
             failure->detail += "; rollback failed: " + rollback_error->operation + " / " + std::to_string(rollback_error->code);
             return {"ROLLBACK_FAILED", false, std::move(failure), std::move(measured)};
         }
-        if (!stop.stop_requested()) {
-            const auto verified = backend.inspect(stop);
-            const auto* restored = find(verified, previous.id);
-            if (!stop.stop_requested() && restored && restored->associated && restored->profile == previous.profile &&
-                restored->bssid == previous.bssid && usable_ipv4(restored->address) && usable_ipv4(restored->gateway)) {
-                return {"ROLLED_BACK", true, std::move(failure), std::move(measured)};
-            }
-            if (!stop.stop_requested()) {
-                failure->detail += "; rollback did not restore association and IPv4 route";
-                return {"ROLLBACK_UNVERIFIED", false, std::move(failure), std::move(measured)};
-            }
+        const auto verified = backend.inspect({});
+        const auto* restored = find(verified, previous.id);
+        if (restored && restored->associated && restored->profile == previous.profile &&
+            restored->bssid == previous.bssid && usable_ipv4(restored->address) && usable_ipv4(restored->gateway)) {
+            return {cancelled ? "CANCELLED_ROLLED_BACK" : "ROLLED_BACK", true, std::move(failure), std::move(measured)};
         }
+        failure->detail += "; rollback did not restore association and IPv4 route";
+        return {"ROLLBACK_UNVERIFIED", false, std::move(failure), std::move(measured)};
     }
-    return {stop.stop_requested() ? "CANCELLED" : "VALIDATION_FAILED", false, std::move(failure), std::move(measured)};
+    if (cancelled && changing) {
+        failure->detail += "; no prior usable association with rollback enabled; host state not restored";
+        return {"CANCELLED_HOST_STATE_UNVERIFIED", false, std::move(failure), std::move(measured)};
+    }
+    return {cancelled ? "CANCELLED" : "VALIDATION_FAILED", false, std::move(failure), std::move(measured)};
 }
 }
