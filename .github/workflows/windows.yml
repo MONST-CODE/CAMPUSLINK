@@ -44,7 +44,7 @@ jobs:
           if (Test-Path logs/build) {
             $logs = Get-ChildItem logs/build -Filter '*.log' | Sort-Object LastWriteTime
             foreach ($log in $logs) {
-              $hits = Get-Content -LiteralPath $log.FullName | Where-Object { $_ -match '(?i)\[FAIL\]|error:|LNK[0-9]+|SUMMARY|Verified SHA-256|Native inventory:|maximum_completed_within_budgets=' } | Select-Object -Last 13
+              $hits = Get-Content -LiteralPath $log.FullName | Where-Object { $_ -match '(?i)\[FAIL\]|error:|LNK[0-9]+|SUMMARY|Verified SHA-256|Verified package:|SHA256:|Native inventory:|maximum_completed_within_budgets=' } | Select-Object -Last 13
               foreach ($line in $hits) {
                 $message = $line.Trim().Replace('%','%25')
                 $level = if ($line -match '(?i)\[FAIL\]|error:|LNK[0-9]+') { 'error' } else { 'notice' }
@@ -61,4 +61,5 @@ jobs:
           name: campuslink-windows-x64
           path: |
             Campus Link/dist/releases/
+            Campus Link/dist/packages/
             Campus Link/logs/build/

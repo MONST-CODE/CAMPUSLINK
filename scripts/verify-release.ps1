@@ -1,13 +1,13 @@
 param([Parameter(Mandatory)][string]$Archive, [string]$ReleaseFolder)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-$archive = Get-Item -LiteralPath $Archive
-$checksum = if ($ReleaseFolder) { Join-Path $ReleaseFolder 'SHA256SUMS.txt' } else { $archive.FullName + '.sha256' }
+$archiveFile = Get-Item -LiteralPath $Archive
+$checksum = if ($ReleaseFolder) { Join-Path $ReleaseFolder 'SHA256SUMS.txt' } else { $archiveFile.FullName + '.sha256' }
 $lines = @(Get-Content -LiteralPath $checksum)
-$expected = $lines | Where-Object { $_ -cmatch ('\A[0-9a-f]{64}  ' + [regex]::Escape($archive.Name) + '\z') } | Select-Object -First 1
-$hash = (Get-FileHash -LiteralPath $archive.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+$expected = $lines | Where-Object { $_ -cmatch ('\A[0-9a-f]{64}  ' + [regex]::Escape($archiveFile.Name) + '\z') } | Select-Object -First 1
+$hash = (Get-FileHash -LiteralPath $archiveFile.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
 if (-not $expected -or $expected.Substring(0,64) -cne $hash) { throw 'Archive SHA-256 does not match its checksum' }
-$zip = [IO.Compression.ZipFile]::OpenRead($archive.FullName)
+$zip = [IO.Compression.ZipFile]::OpenRead($archiveFile.FullName)
 try {
     $items = @($zip.Entries | Where-Object { $_.FullName -ceq 'manifest.json' })
     if ($items.Count -ne 1 -or $items[0].Length -gt 131072) { throw 'Missing, duplicate or oversized manifest' }
