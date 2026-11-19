@@ -1,0 +1,31 @@
+PASS Healthy
+PASS DHCP pool exhausted
+PASS No DHCP response
+PASS Lease expiry and renewal
+PASS Invalid IP
+PASS Gateway unavailable
+PASS Slow DNS
+PASS DNS unavailable
+PASS Weak signal
+PASS Congestion
+PASS Loss and jitter
+PASS Unstable access
+PASS Logical IP conflict
+PASS No access point
+PASS Association rejected
+PASS Authentication denied
+PASS transition contract
+PASS pool capacity and lease ownership/expiry
+PASS scheduler cancellation and 10k clients
+PASS scenario codec
+PASS capacity profiler budgets
+PASS score bounded, missingness and eligibility
+PASS ranking freshness, cooldown and hysteresis
+PASS scope strict validation
+PASS bounded DNS reply validation
+PASS discovery preserves multiple BSS per SSID; APIPA stays hypothesis
+PASS authorized handoff and post-connect validation
+PASS scope rejection, absent adapter, cancellation make no mutation
+PASS one rollback when endpoint verification fails
+PASS failed connection and failed rollback are bounded and preserve timeout
+SUMMARY 30 passed, 0 failed
