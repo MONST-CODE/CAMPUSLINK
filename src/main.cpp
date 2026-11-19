@@ -2,6 +2,7 @@
 #include <SDL3/SDL_main.h>
 
 #include "campuslink/ui.hpp"
+#include "campuslink/build_info.hpp"
 #include "campuslink/network.hpp"
 #include "campuslink/simulation.hpp"
 
@@ -91,6 +92,10 @@ int run(bool self_test) {
 }  // namespace
 
 int main(int argc, char* argv[]) {
+    if (argc == 2 && std::string_view{argv[1]} == "--version") {
+        std::printf("CAMPUSLINK %s | %s | %s | %s | %s\n", campuslink::build::version, campuslink::build::revision,
+            campuslink::build::architecture, campuslink::build::system, campuslink::build::configuration); return 0;
+    }
     const bool self_test = argc == 2 && std::string_view{argv[1]} == "--self-test";
     const bool graphics = argc == 2 && std::string_view{argv[1]} == "--graphics-smoke";
     const bool ui_test = argc == 2 && std::string_view{argv[1]} == "--ui-smoke";
@@ -137,14 +142,14 @@ int main(int argc, char* argv[]) {
 #endif
     }
     if (argc != 1 && !self_test && !ui_test && !graphics) {
-        std::fputs("Usage: CampusLink [--self-test | --ui-smoke | --inventory-smoke | --profile | --graphics-smoke | --clp1-loopback PORT]\n", stderr);
+        std::fputs("Usage: CampusLink [--version | --self-test | --ui-smoke | --inventory-smoke | --profile | --graphics-smoke | --clp1-loopback PORT]\n", stderr);
         return 2;
     }
     const int result = self_test ? run(true) : campuslink::ui::run(ui_test || graphics, graphics);
     if (self_test && result == 0) {
         std::printf("PASS: SDL %d runtime, dummy window and quit event\n", SDL_GetVersion());
     }
-    if (ui_test && result == 0) std::puts("PASS: SDL dummy + ImGui software rendering, all eleven panels and quit event");
-    if (graphics && result == 0) std::puts("PASS: native SDL Vulkan, all eleven panels and quit event");
+    if (ui_test && result == 0) std::puts("PASS: SDL dummy + ImGui software rendering, 12 panels in four language/theme combinations and quit event");
+    if (graphics && result == 0) std::puts("PASS: native SDL Vulkan, 12 panels in four language/theme combinations and quit event");
     return result;
 }

@@ -39,6 +39,9 @@ jobs:
           call build.bat bad-command
           if not "%ERRORLEVEL%"=="2" exit /b 1
           exit /b 0
+      - name: Verify the bilingual catalog
+        shell: cmd
+        run: python tests\integration\ui_catalog.py
       - name: CLP1 loopback protocol test
         shell: cmd
         run: python tests\integration\clp1_loopback.py
@@ -96,7 +99,7 @@ jobs:
             Campus Link/logs/build/
   prepare-release:
     # Only an explicit release-marker commit from this product branch may write a draft.
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/arena/4ad88df5-campuslink' && contains(github.event.head_commit.message, '[prepare-release]') }}
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/arena/b2cfefe0-campuslink' && contains(github.event.head_commit.message, '[prepare-release]') }}
     needs: native
     runs-on: windows-2022
     permissions:

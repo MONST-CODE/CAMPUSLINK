@@ -1,0 +1,126 @@
+=== debug Linux host ===
+PASS Healthy
+PASS DHCP pool exhausted
+PASS No DHCP response
+PASS Lease expiry and renewal
+PASS Invalid IP
+PASS Gateway unavailable
+PASS Slow DNS
+PASS DNS unavailable
+PASS Weak signal
+PASS Congestion
+PASS Loss and jitter
+PASS Unstable access
+PASS Logical IP conflict
+PASS No access point
+PASS Association rejected
+PASS Authentication denied
+PASS DHCP renewal retains a slot without restarting DORA
+PASS transition contract
+PASS pool capacity and lease ownership/expiry
+PASS scheduler cancellation and 10k clients
+PASS scenario codec
+PASS capacity profiler budgets
+PASS score bounded, missingness and eligibility
+PASS ranking freshness, cooldown and hysteresis
+PASS handoff ranks only the latest host-validated same-interface evidence
+PASS scope strict validation
+PASS bounded DNS reply validation
+PASS discovery preserves multiple BSS per SSID; APIPA stays hypothesis
+PASS authorized handoff and post-connect validation
+PASS scope rejection, absent adapter, cancellation make no mutation
+PASS one rollback when endpoint verification fails
+PASS failed connection and failed rollback are bounded and preserve timeout
+PASS distribution and incomplete transfer confidence
+PASS experiment waves enforce explicit permission and device independence
+PASS multi-scope codec, hard caps and comparison identity
+PASS rollback must verify Windows state and gateway policy
+PASS cancellation restores only the captured link when rollback is allowed
+PASS 50k logical clients deterministic completion
+SUMMARY 38 passed, 0 failed
+PASS: SDL 3002030 runtime, dummy window and quit event
+PASS: SDL dummy + ImGui software rendering, all eleven panels and quit event
+LOGICAL_SIMULATION_CAPACITY | limits: 10000 clients, 32 MiB RSS growth budget, 1500 ms wall, 900 ms process CPU
+clients,transitions,events_per_second,wall_ms,cpu_ms,batch_p95_us,baseline_rss,sampled_peak_rss,sampled_growth,accounted_bytes,status
+1,11,339705.4,0.032,0.032,8.002,2314240,2314240,0,372,PASS
+2,22,933548.3,0.024,0.024,9.270,2314240,2314240,0,744,PASS
+4,44,1314767.2,0.033,0.034,18.793,2314240,2314240,0,1488,PASS
+8,88,808244.1,0.109,0.102,85.671,2314240,2314240,0,2976,PASS
+16,176,1197979.8,0.147,0.147,82.864,2314240,2314240,0,5952,PASS
+32,352,1343911.5,0.262,0.262,99.896,2314240,2314240,0,11904,PASS
+64,704,1318601.5,0.534,0.534,127.685,2314240,2314240,0,23808,PASS
+128,1408,1198039.9,1.175,1.175,138.408,2314240,2314240,0,47616,PASS
+256,2816,907617.4,3.103,3.070,164.778,2314240,2314240,0,95232,PASS
+512,5632,873893.1,6.445,6.444,182.351,2314240,4067328,1753088,190464,PASS
+1024,11264,814695.4,13.826,13.721,192.493,2314240,4063232,1748992,380928,PASS
+2048,22528,839898.4,26.822,26.822,192.043,2314240,4329472,2015232,761856,PASS
+4096,45056,825090.3,54.607,54.576,196.618,2314240,4870144,2555904,1523712,PASS
+8192,90112,761816.4,118.286,118.272,205.633,2314240,5951488,3637248,3047424,PASS
+10000,110000,734630.8,149.735,149.674,214.554,2314240,6582272,4268032,3720000,PASS
+maximum_completed_within_budgets=10000 (offline workload, not radio capacity)
+profile_stop=LIMIT_REACHED
+Usage: CampusLink [--self-test | --ui-smoke | --inventory-smoke | --profile | --graphics-smoke | --clp1-loopback PORT]
+ERROR: SDL_Init(video): nonexistent not available
+=== release Linux host ===
+PASS Healthy
+PASS DHCP pool exhausted
+PASS No DHCP response
+PASS Lease expiry and renewal
+PASS Invalid IP
+PASS Gateway unavailable
+PASS Slow DNS
+PASS DNS unavailable
+PASS Weak signal
+PASS Congestion
+PASS Loss and jitter
+PASS Unstable access
+PASS Logical IP conflict
+PASS No access point
+PASS Association rejected
+PASS Authentication denied
+PASS DHCP renewal retains a slot without restarting DORA
+PASS transition contract
+PASS pool capacity and lease ownership/expiry
+PASS scheduler cancellation and 10k clients
+PASS scenario codec
+PASS capacity profiler budgets
+PASS score bounded, missingness and eligibility
+PASS ranking freshness, cooldown and hysteresis
+PASS handoff ranks only the latest host-validated same-interface evidence
+PASS scope strict validation
+PASS bounded DNS reply validation
+PASS discovery preserves multiple BSS per SSID; APIPA stays hypothesis
+PASS authorized handoff and post-connect validation
+PASS scope rejection, absent adapter, cancellation make no mutation
+PASS one rollback when endpoint verification fails
+PASS failed connection and failed rollback are bounded and preserve timeout
+PASS distribution and incomplete transfer confidence
+PASS experiment waves enforce explicit permission and device independence
+PASS multi-scope codec, hard caps and comparison identity
+PASS rollback must verify Windows state and gateway policy
+PASS cancellation restores only the captured link when rollback is allowed
+PASS 50k logical clients deterministic completion
+SUMMARY 38 passed, 0 failed
+PASS: SDL 3002030 runtime, dummy window and quit event
+PASS: SDL dummy + ImGui software rendering, all eleven panels and quit event
+LOGICAL_SIMULATION_CAPACITY | limits: 10000 clients, 32 MiB RSS growth budget, 1500 ms wall, 900 ms process CPU
+clients,transitions,events_per_second,wall_ms,cpu_ms,batch_p95_us,baseline_rss,sampled_peak_rss,sampled_growth,accounted_bytes,status
+1,11,470608.4,0.023,0.023,5.895,2306048,2306048,0,372,PASS
+2,22,1196823.0,0.018,0.019,2.942,2306048,2306048,0,744,PASS
+4,44,2797025.0,0.016,0.015,2.908,2306048,2306048,0,1488,PASS
+8,88,3880412.7,0.023,0.023,5.407,2306048,2306048,0,2976,PASS
+16,176,6374963.8,0.028,0.027,8.180,2306048,2306048,0,5952,PASS
+32,352,8339058.5,0.042,0.043,10.167,2306048,2306048,0,11904,PASS
+64,704,9450045.0,0.074,0.075,12.245,2306048,2306048,0,23808,PASS
+128,1408,8472689.4,0.166,0.166,13.949,2306048,2306048,0,47616,PASS
+256,2816,7225366.8,0.390,0.389,17.493,2306048,2306048,0,95232,PASS
+512,5632,7005219.1,0.804,0.804,23.971,2306048,4014080,1708032,190464,PASS
+1024,11264,6589616.2,1.709,1.709,18.874,2306048,4009984,1703936,380928,PASS
+2048,22528,6314807.5,3.567,3.567,20.709,2306048,4276224,1970176,761856,PASS
+4096,45056,5681379.0,7.930,7.931,26.150,2306048,4816896,2510848,1523712,PASS
+8192,90112,6581446.5,13.692,13.604,25.536,2306048,5898240,3592192,3047424,PASS
+10000,110000,7559453.7,14.551,14.551,18.852,2306048,6529024,4222976,3720000,PASS
+maximum_completed_within_budgets=10000 (offline workload, not radio capacity)
+profile_stop=LIMIT_REACHED
+Usage: CampusLink [--self-test | --ui-smoke | --inventory-smoke | --profile | --graphics-smoke | --clp1-loopback PORT]
+ERROR: SDL_Init(video): nonexistent not available

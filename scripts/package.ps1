@@ -2,6 +2,7 @@
 param([Parameter(Mandatory)][string]$Root, [string]$Version, [string]$BinaryDirectory,
       [string]$Compiler, [string]$BuildLog, [switch]$ReleaseAll)
 $ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $dist = Join-Path $Root 'dist'
 $packages = Join-Path $dist 'packages'
@@ -29,16 +30,30 @@ function Run-Extracted([string]$Exe, [string]$TestName) {
         $stderr = $p.StandardError.ReadToEndAsync()
         if (-not $p.WaitForExit(20000)) { $p.Kill(); $p.WaitForExit(); throw "Extracted smoke test $TestName timed out" }
         $code = $p.ExitCode
-        $stdout.GetAwaiter().GetResult().Trim()
+        $output = $stdout.GetAwaiter().GetResult().Trim()
+        $output
         $stderr.GetAwaiter().GetResult().Trim()
         if ($code -ne 0) { throw "Extracted smoke test $TestName failed: $code" }
+        if ($TestName -eq '--version' -and $output -cne "CAMPUSLINK $Version | $($commit.Substring(0,12)) | x64 | Windows 11 | Release") {
+            throw 'Extracted executable metadata disagrees with VERSION or source commit'
+        }
     } finally { $p.Dispose() }
 }
 [void][IO.Directory]::CreateDirectory($stage)
 try {
     $licenses = Join-Path $stage 'LICENSES'
     $config = Join-Path $stage 'config'
+    $fonts = Join-Path $stage 'assets\fonts'
+    [void][IO.Directory]::CreateDirectory($fonts)
+    $lockedDeps = Get-Content -LiteralPath (Join-Path $Root 'deps.lock') -Raw | ConvertFrom-Json
+    foreach ($font in $lockedDeps.fonts) {
+        $resource = Join-Path $BinaryDirectory ('assets\fonts\' + $font.file)
+        $notice = Join-Path $Root ('assets\fonts\' + $font.licenseFile)
+        if ((Hash $resource) -cne $font.sha256 -or (Hash $notice) -cne $font.licenseSha256) { throw "Font integrity mismatch: $($font.file)" }
+        Copy-Item -LiteralPath $resource -Destination $fonts
+    }
     [void][IO.Directory]::CreateDirectory($licenses)
+    foreach ($font in $lockedDeps.fonts) { Copy-Item -LiteralPath (Join-Path $Root ('assets\fonts\' + $font.licenseFile)) -Destination $licenses }
     [void][IO.Directory]::CreateDirectory($config)
     foreach ($file in @('CampusLink.exe','SDL3.dll')) {
         Copy-Item -LiteralPath (Join-Path $BinaryDirectory $file) -Destination (Join-Path $stage $file)
@@ -92,14 +107,21 @@ try {
     $manifestPath = Join-Path $stage 'manifest.json'
     Write-Utf8 $manifestPath ($build | ConvertTo-Json -Depth 8)
     $manifestHash = Hash $manifestPath
-    [IO.Compression.ZipFile]::CreateFromDirectory($stage, $zip, [IO.Compression.CompressionLevel]::Optimal, $false)
+    # Windows PowerShell/.NET may use OS separators in CreateFromDirectory. Use explicit ZIP entry names.
+    $writer = [IO.Compression.ZipFile]::Open($zip, [IO.Compression.ZipArchiveMode]::Create)
+    try {
+        foreach ($entryPath in (@($files | ForEach-Object { $_.path }) + 'manifest.json')) {
+            [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile($writer, (Join-Path $stage $entryPath), $entryPath, [IO.Compression.CompressionLevel]::Optimal)
+        }
+    } finally { $writer.Dispose() }
     $archive = [IO.Compression.ZipFile]::OpenRead($zip)
     try {
         $expected = @($files | ForEach-Object { $_.path }) + 'manifest.json'
         if ($archive.Entries.Count -ne $expected.Count) { throw 'Unexpected ZIP entry count' }
         $seen = @{}
         foreach ($entry in $archive.Entries) {
-            $name = $entry.FullName.Replace('\','/')
+            $name = $entry.FullName
+            if ($name.Contains('\')) { throw 'ZIP entry uses a Windows path separator' }
             if (-not ($expected -ccontains $name) -or $seen.ContainsKey($name)) { throw "Unexpected/duplicate ZIP entry: $name" }
             $seen[$name] = $true
         }
@@ -112,6 +134,7 @@ try {
         $f = Join-Path $extract $item.path
         if ((Get-Item -LiteralPath $f).Length -ne $item.bytes -or (Hash $f) -ne $item.sha256) { throw "File integrity failure: $($item.path)" }
     }
+    Run-Extracted (Join-Path $extract 'CampusLink.exe') '--version'
     Run-Extracted (Join-Path $extract 'CampusLink.exe') '--self-test'
     Run-Extracted (Join-Path $extract 'CampusLink.exe') '--ui-smoke'
     $zipHash = Hash $zip

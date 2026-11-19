@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0 — Bilingual desktop workspace
+
+- French-first runtime localization, with an instant FR/EN switch and a checked catalog.
+- A sky-blue visual identity, separately designed light/dark themes, responsive navigation and a confirmation dialog for physical trials.
+- Inter and JetBrains Mono with persisted font size, layout density and window size.
+- A bilingual About and quick-start page with actual build metadata.
+- Windows portable ZIP assets and notices are hashed, and ZIP paths must use forward slashes.
+
 ## 0.2.1 — Validation and lab operability
 
 - Assisted handoff requires a host-validated result on the same interface. The latest failed measurement supersedes older successful measurements for that interface, BSSID and method.

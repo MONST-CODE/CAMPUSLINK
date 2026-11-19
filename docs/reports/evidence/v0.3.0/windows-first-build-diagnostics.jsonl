@@ -1,0 +1,8 @@
+{"annotation_level":"warning","message":"Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@v4, actions/upload-artifact@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/","title":""}
+{"annotation_level":"failure","message":"[FAIL] Native command returned 1.","title":"CAMPUSLINK"}
+{"annotation_level":"failure","message":"[FAIL] 11.54s | exit 1 | Native command returned 1.","title":"CAMPUSLINK"}
+{"annotation_level":"failure","message":"D:\\a\\CAMPUSLINK\\CAMPUSLINK\\Campus Link\\src\\ui\\desktop.cpp:686:67: error: format string is not a string literal (potentially insecure) [-Werror,-Wformat-security]","title":"CAMPUSLINK"}
+{"annotation_level":"failure","message":"D:\\a\\CAMPUSLINK\\CAMPUSLINK\\Campus Link\\src\\ui\\desktop.cpp:649:87: error: format string is not a string literal (potentially insecure) [-Werror,-Wformat-security]","title":"CAMPUSLINK"}
+{"annotation_level":"failure","message":"D:\\a\\CAMPUSLINK\\CAMPUSLINK\\Campus Link\\src\\ui\\desktop.cpp:625:110: error: format string is not a string literal (potentially insecure) [-Werror,-Wformat-security]","title":"CAMPUSLINK"}
+{"annotation_level":"failure","message":"D:\\a\\CAMPUSLINK\\CAMPUSLINK\\Campus Link\\src\\ui\\desktop.cpp:567:62: error: format string is not a string literal (potentially insecure) [-Werror,-Wformat-security]","title":"CAMPUSLINK"}
+{"annotation_level":"failure","message":"Process completed with exit code 1.","title":""}

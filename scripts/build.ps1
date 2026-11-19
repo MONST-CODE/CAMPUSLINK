@@ -258,6 +258,15 @@ try {
     }
     if ($command -ne 'doctor') {
         $target = '--target=x86_64-pc-windows-msvc'
+        $buildRevision = & git.exe -C $root rev-parse '--short=12' HEAD
+        if ($LASTEXITCODE -ne 0 -or $buildRevision -notmatch '^[0-9a-f]{12}$') { throw 'Unable to identify the build commit' }
+        $fontRoot = Join-Path $root 'assets\fonts'
+        $fontLock = (Get-Content -LiteralPath (Join-Path $root 'deps.lock') -Raw | ConvertFrom-Json).fonts
+        foreach ($font in $fontLock) {
+            foreach ($item in @(@{ file = $font.file; sha = $font.sha256 }, @{ file = $font.licenseFile; sha = $font.licenseSha256 })) {
+                if ((Get-FileHash -LiteralPath (Join-Path $fontRoot $item.file) -Algorithm SHA256).Hash.ToLowerInvariant() -cne $item.sha) { throw "Font integrity mismatch: $($item.file)" }
+            }
+        }
         $core = @('src\simulation\lab.cpp','src\network\diagnostics.cpp','src\network\dns.cpp','src\performance\score.cpp')
         $app = @('src\main.cpp','src\ui\desktop.cpp','src\platform\windows\native.cpp')
         $builds = @{}
@@ -279,7 +288,7 @@ try {
                 $runtime = if ($config -eq 'debug') { '-fms-runtime-lib=static_dbg' } else { '-fms-runtime-lib=static' }
                 $opts = if ($config -eq 'debug') { @('-O0','-g','-gcodeview') } else { @('-O2','-DNDEBUG') }
                 $common = @($target, $runtime, '-std=c++20', '-DUNICODE', '-D_UNICODE', '-DWINVER=0x0A00', '-D_WIN32_WINNT=0x0A00',
-                    "-DCAMPUSLINK_VERSION=$version", '-I', (Join-Path $root 'include'), '-isystem', $deps.headers,
+                    "-DCAMPUSLINK_VERSION=$version", "-DCAMPUSLINK_BUILD=$buildRevision", '-I', (Join-Path $root 'include'), '-isystem', $deps.headers,
                     '-isystem', $deps.imgui, '-isystem', $deps.imguiBackends) + $opts
                 $flags = @('-Wall', '-Wextra', '-Wpedantic', '-Werror')
                 $coreObjects = @()
@@ -313,6 +322,9 @@ try {
                 Test-X64Pe $pendingExe
                 [void][IO.Directory]::CreateDirectory($paths.bin)
                 Copy-Item -LiteralPath $deps.dll -Destination (Join-Path $paths.bin 'SDL3.dll') -Force
+                $fontDest = Join-Path $paths.bin 'assets\fonts'
+                [void][IO.Directory]::CreateDirectory($fontDest)
+                foreach ($font in $fontLock) { Copy-Item -LiteralPath (Join-Path $fontRoot $font.file) -Destination $fontDest -Force }
                 Copy-Item -LiteralPath $pendingExe -Destination (Join-Path $paths.bin 'CampusLink.exe') -Force
                 if ($withTests) {
                     $testExe = Join-Path $paths.bin 'CampusLinkTests.exe'
