@@ -390,7 +390,7 @@ void metric_cards(unsigned a, unsigned b, unsigned c) {
 struct Screen {
     int page{}, selected_bss{-1};
     bool export_csv{}, consent{}, warnings_only{};
-    bool unreadable_preferences{}, unsaved_preferences{};
+    bool unreadable_preferences{}, unsaved_preferences{}, reset_display{};
     std::vector<net::Experiment> confirmation;
     bool confirmation_queue{};
     unsigned logical_selected{}, logical_page{1};
@@ -790,8 +790,8 @@ struct Screen {
             ImGui::SliderInt(tr(Key::FontSize), &prefs.size, 13, 24, "%d px", ImGuiSliderFlags_AlwaysClamp);
             ImGui::Checkbox(tr(Key::CompactMode), &prefs.compact);
             if (ImGui::Button(tr(Key::RestoreDisplay))) {
-                const int width = prefs.width, height = prefs.height;
-                prefs = {}; prefs.width = width; prefs.height = height; unreadable_preferences = false;
+                prefs = {};
+                reset_display = true;
             }
             if (!fonts.inter || !fonts.mono) paragraph(tr(Key::FontUnavailable));
             ImGui::SeparatorText(tr(Key::TypographyPreview));
@@ -905,8 +905,13 @@ int run(bool smoke, bool graphics) {
             display.shutdown(); display.warning = english(Key::VulkanRenderingFailedUsingSdl);
             if (!display.setup(true)) return 1;
         }
-        if (!smoke && prefs != previous) {
+        if (!smoke && (screen.reset_display || prefs != previous)) {
+            if (screen.reset_display) {
+                SDL_SetWindowSize(window.get(), prefs.width, prefs.height);
+                screen.reset_display = false;
+            }
             screen.unsaved_preferences = !save_preferences(pref_path, prefs);
+            if (!screen.unsaved_preferences) screen.unreadable_preferences = false;
             previous = prefs;
         }
         if (smoke && ++frames == total_frames) { SDL_Event close{}; close.type = SDL_EVENT_QUIT; if (!SDL_PushEvent(&close)) return 1; }
