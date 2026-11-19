@@ -1,0 +1,8 @@
+src/main.cpp
+src/platform/windows/native.cpp
+src/ui/desktop.cpp
+src/network/diagnostics.cpp
+src/network/dns.cpp
+src/performance/score.cpp
+src/simulation/lab.cpp
+tests/unit/core.cpp

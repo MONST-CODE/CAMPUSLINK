@@ -1,6 +1,6 @@
 # Build and local release
 
-`build.bat package` builds/takes tests in Release, builds a fresh ZIP, verifies the manifest and hashes, extracts it under a directory with spaces and runs SDL + ImGui smoke tests from it. `build.bat release-all` also rebuilds and tests Debug before generating `dist/releases/v<VERSION>/`. It refuses to overwrite a versioned local release; move it aside before repeating the command. There is no automatic publication.
+`build.bat package` builds/takes tests in Release, builds a fresh ZIP, verifies the manifest and hashes, extracts it under a directory with spaces and runs SDL + ImGui smoke tests from it. `build.bat release-all` also rebuilds and tests Debug before generating `dist/releases/v<VERSION>/`. It refuses to overwrite a versioned local release; move it aside before repeating the command. The local command does not publish to GitHub.
 
 Portable output: `dist/packages/CAMPUSLINK-<VERSION>-windows-x64-portable.zip` plus `.sha256`. The local release contains the ZIP, manifest, build information, dependency inventory, notes, checksums and verification report. `manifest.json` describes payload entries (not itself); `SHA256SUMS.txt` verifies the whole ZIP and standalone manifest. Run `powershell -NoProfile -File scripts\verify-release.ps1 -Archive <zip>` against `dist/packages` or also pass `-ReleaseFolder <folder>` for a versioned local release. SHA-256 checks integrity, not authorship. Timestamps are included by design; bit-identical ZIPs are not claimed.
 
