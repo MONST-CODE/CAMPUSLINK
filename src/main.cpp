@@ -91,22 +91,24 @@ int run(bool self_test) {
 
 int main(int argc, char* argv[]) {
     const bool self_test = argc == 2 && std::string_view{argv[1]} == "--self-test";
+    const bool graphics = argc == 2 && std::string_view{argv[1]} == "--graphics-smoke";
     const bool ui_test = argc == 2 && std::string_view{argv[1]} == "--ui-smoke";
     if (argc == 2 && std::string_view{argv[1]} == "--profile") {
         try {
             const campuslink::sim::Budget budget;
-            const auto samples = campuslink::sim::profile(budget);
-            std::printf("LOGICAL_SIMULATION_CAPACITY | limits: %u clients, %u MiB accounted, %u ms wall, %u ms process CPU\n",
+            const auto profile = campuslink::sim::profile(budget);
+            std::printf("LOGICAL_SIMULATION_CAPACITY | limits: %u clients, %u MiB RSS growth budget, %u ms wall, %u ms process CPU\n",
                 budget.max_clients, budget.memory_mib, budget.wall_ms, budget.cpu_ms);
-            std::puts("clients,transitions,events_per_second,wall_ms,cpu_ms,batch_p95_us,accounted_bytes,status");
-            unsigned capacity{};
-            for (const auto& s : samples) {
-                if (s.within_budget) capacity = s.clients;
-                std::printf("%u,%u,%.1f,%.3f,%.3f,%.3f,%llu,%s\n", s.clients, s.events,
+            std::puts("clients,transitions,events_per_second,wall_ms,cpu_ms,batch_p95_us,baseline_rss,sampled_peak_rss,sampled_growth,accounted_bytes,status");
+            const auto capacity = profile.completed_clients();
+            for (const auto& s : profile.samples) {
+                std::printf("%u,%u,%.1f,%.3f,%.3f,%.3f,%llu,%llu,%llu,%llu,%s\n", s.clients, s.events,
                     s.elapsed_ms > 0 ? 1000 * s.events / s.elapsed_ms : 0, s.elapsed_ms, s.cpu_ms, s.p95_us,
-                    static_cast<unsigned long long>(s.accounted_bytes), s.within_budget ? "PASS" : "BUDGET_STOP");
+                    static_cast<unsigned long long>(s.baseline_rss), static_cast<unsigned long long>(s.sampled_peak_rss),
+                    static_cast<unsigned long long>(s.sampled_growth), static_cast<unsigned long long>(s.accounted_bytes), s.within_budget ? "PASS" : "BUDGET_STOP");
             }
             std::printf("maximum_completed_within_budgets=%u (offline workload, not radio capacity)\n", capacity);
+            std::printf("profile_stop=%s\n", campuslink::sim::name(profile.end).data());
             return capacity ? 0 : 1;
         } catch (const std::exception& e) {
             std::fprintf(stderr, "Profiler: %s\n", e.what()); return 1;
@@ -123,14 +125,15 @@ int main(int argc, char* argv[]) {
         return 3;
 #endif
     }
-    if (argc != 1 && !self_test && !ui_test) {
-        std::fputs("Usage: CampusLink [--self-test | --ui-smoke | --inventory-smoke | --profile]\n", stderr);
+    if (argc != 1 && !self_test && !ui_test && !graphics) {
+        std::fputs("Usage: CampusLink [--self-test | --ui-smoke | --inventory-smoke | --profile | --graphics-smoke]\n", stderr);
         return 2;
     }
-    const int result = self_test ? run(true) : campuslink::ui::run(ui_test);
+    const int result = self_test ? run(true) : campuslink::ui::run(ui_test || graphics, graphics);
     if (self_test && result == 0) {
         std::printf("PASS: SDL %d runtime, dummy window and quit event\n", SDL_GetVersion());
     }
-    if (ui_test && result == 0) std::puts("PASS: SDL dummy + ImGui software rendering, three frames and quit event");
+    if (ui_test && result == 0) std::puts("PASS: SDL dummy + ImGui software rendering, all eleven panels and quit event");
+    if (graphics && result == 0) std::puts("PASS: native SDL Vulkan, all eleven panels and quit event");
     return result;
 }

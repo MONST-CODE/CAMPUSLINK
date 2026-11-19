@@ -22,6 +22,17 @@ jobs:
       - name: Validate environment
         shell: cmd
         run: call build.bat doctor
+      - name: Validate ASCII fallback and UTF-8 build logs
+        shell: powershell
+        run: |
+          $env:CAMPUSLINK_ASCII = '1'; $env:NO_COLOR = '1'
+          $lines = @(& cmd.exe /d /c call build.bat help)
+          if ($LASTEXITCODE -ne 0 -or -not ($lines -match 'CAMPUSLINK') -or ($lines -match '[^\x00-\x7f]')) {
+            throw 'ASCII build help failed'
+          }
+          $latest = Get-ChildItem logs/build -Filter '*.log' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          $bytes = [IO.File]::ReadAllBytes($latest.FullName)
+          if ($bytes.Length -lt 3 -or $bytes[0] -ne 239 -or $bytes[1] -ne 187 -or $bytes[2] -ne 191) { throw 'Expected UTF-8 BOM' }
       - name: Verify invalid command exit code
         shell: cmd
         run: |
@@ -80,3 +91,44 @@ jobs:
             Campus Link/dist/releases/
             Campus Link/dist/packages/
             Campus Link/logs/build/
+  prepare-release:
+    # Only an explicit release-marker commit from this product branch may write a draft.
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/arena/4ad88df5-campuslink' && contains(github.event.head_commit.message, '[prepare-release]') }}
+    needs: native
+    runs-on: windows-2022
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: campuslink-windows-x64
+          path: candidate
+      - name: Attach the verified ZIP and proofs to a new draft release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $folders = @(Get-ChildItem candidate/dist/releases -Directory)
+          if ($folders.Count -ne 1 -or $folders[0].Name -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw 'Unexpected verified release directory' }
+          $folder = $folders[0]
+          $files = @(Get-ChildItem $folder.FullName -File)
+          $zip = @($files | Where-Object Extension -eq '.zip')
+          if ($zip.Count -ne 1) { throw 'Expected one verified package archive' }
+          foreach ($file in @($zip[0], (Get-Item (Join-Path $folder.FullName 'manifest.json')))) {
+            $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ("$hash  $($file.Name)" -cnotin (Get-Content (Join-Path $folder.FullName 'SHA256SUMS.txt'))) { throw 'Checksums changed after packaging' }
+          }
+          $meta = Get-Content (Join-Path $folder.FullName 'BUILD_INFO.json') -Raw | ConvertFrom-Json
+          if ($meta.commit -ne $env:GITHUB_SHA -or $meta.dirty -or ('v' + $meta.version) -ne $folder.Name) { throw 'Artifact provenance mismatch' }
+          $tags = @(gh api "repos/$env:GH_REPO/tags" --paginate --jq '.[].name')
+          if ($LASTEXITCODE -ne 0 -or $tags -contains $folder.Name) { throw 'Cannot verify version availability or tag already exists' }
+          $assets = @($files.FullName)
+          $logs = @(Get-ChildItem candidate/logs/build -Filter '*.log' -File)
+          if ($logs.Count) {
+            Compress-Archive -LiteralPath $logs.FullName -DestinationPath candidate/windows-ci-logs.zip
+            $assets += (Get-Item candidate/windows-ci-logs.zip).FullName
+          }
+          $notes = Join-Path $folder.FullName 'RELEASE_NOTES.md'
+          gh release create $folder.Name @assets --draft --prerelease --target $env:GITHUB_SHA --title "CAMPUSLINK $($folder.Name) candidate" --notes-file $notes
+          if ($LASTEXITCODE -ne 0) { throw "Draft release creation returned $LASTEXITCODE" }

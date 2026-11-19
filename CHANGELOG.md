@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0 — Product completion candidate
+
+- Native radio evidence now distinguishes vendor documentation, driver reports, active OS associations and validated trial windows. Secondary STA returns a native result, not an inferred ceiling.
+- Progressive capacity profiling samples process RSS and names the stop cause (`LIMIT_REACHED`, budget or cancellation). Lab models offer ownership, ACK lease start and DHCP retry backoff; logical histories can be inspected and cleared.
+- Explicit authorized batches serialize candidates unless distinct physical PnP devices and endpoints permit parallel waves. Handoff verifies stable Windows IPv4 and confirms rollback state.
+- CLP1 tests multiple sizes and paced repetitions, with stabilization, RTT distribution, DNS timing, per-size statistics and sample sufficiency. The score and assisted selection compare matching methods only.
+- Eleven-panel render smoke, opt-in native Vulkan smoke, portable Windows 11 acceptance tooling, CI packaging verification and versioned draft-release preparation.
+
 ## 0.1.0 — Candidate
 
 - SDL3 + Dear ImGui desktop with Vulkan-first SDL GPU and software fallback.

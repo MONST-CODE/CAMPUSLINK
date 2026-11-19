@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <charconv>
 #include <chrono>
+#include <fstream>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <tuple>
@@ -11,8 +13,10 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <psapi.h>
 #else
 #include <ctime>
+#include <unistd.h>
 #endif
 
 namespace campuslink::sim {
@@ -38,6 +42,21 @@ double cpu_ms() {
     return static_cast<double>(std::clock()) * 1000.0 / CLOCKS_PER_SEC;
 #endif
 }
+std::uint64_t resident_bytes() {
+#ifdef _WIN32
+    PROCESS_MEMORY_COUNTERS memory{};
+    memory.cb = sizeof memory;
+    if (!K32GetProcessMemoryInfo(GetCurrentProcess(), &memory, sizeof memory)) throw std::runtime_error("K32GetProcessMemoryInfo failed");
+    return memory.WorkingSetSize;
+#else
+    std::ifstream statm("/proc/self/statm");
+    std::uint64_t total{}, resident{};
+    const auto page = sysconf(_SC_PAGESIZE);
+    if (page <= 0 || !(statm >> total >> resident)) throw std::runtime_error("Cannot sample resident memory from /proc/self/statm");
+    return resident * static_cast<std::uint64_t>(page);
+#endif
+}
+
 }
 std::string_view name(State s) { return states.at(static_cast<unsigned>(s)); }
 std::string_view name(Scenario s) { return scenarios.at(static_cast<unsigned>(s)); }
@@ -87,7 +106,7 @@ DhcpSimulator::DhcpSimulator(unsigned slots) : slots_(slots) {
     for (unsigned i = 1; i <= slots; ++i) free_.push(i);
 }
 unsigned DhcpSimulator::acquire(unsigned owner, unsigned now, unsigned duration) {
-    if (!owner || free_.empty()) return 0;
+    if (!owner || free_.empty() || !duration || duration > UINT32_MAX - now) return 0;
     const auto slot = free_.front(); free_.pop();
     slots_[slot - 1] = {owner, now + duration};
     return slot;
@@ -100,6 +119,11 @@ bool DhcpSimulator::release(unsigned slot, unsigned owner) {
 }
 bool DhcpSimulator::valid(unsigned slot, unsigned owner, unsigned now) const {
     return slot && slot <= slots_.size() && owner && slots_[slot - 1].owner == owner && now < slots_[slot - 1].expires;
+}
+bool DhcpSimulator::commit(unsigned slot, unsigned owner, unsigned now, unsigned duration) {
+    if (!valid(slot, owner, now) || !duration || duration > UINT32_MAX - now) return false;
+    slots_[slot - 1].expires = now + duration;
+    return true;
 }
 bool Lab::Item::operator>(const Item& other) const { return std::tie(time, index) > std::tie(other.time, other.index); }
 Lab::Lab(Config c) : config_(checked(c)), dhcp_(c.scenario == Scenario::pool ? std::min(c.pool, std::max(1u, c.clients / 2)) : c.pool),
@@ -127,14 +151,22 @@ void Lab::update(unsigned index) {
     case State::association: if (s == Scenario::rejected) fail(State::rejected); else next(State::authentication, s == Scenario::weak_signal ? 50 : 4); break;
     case State::authentication: if (s == Scenario::auth_denied) fail(State::auth_denied); else next(State::dhcp, s == Scenario::no_dhcp ? 100 : 4); break;
     case State::dhcp:
-        if (s == Scenario::no_dhcp) fail(State::no_dhcp);
-        else if (!(c.slot = dhcp_.acquire(c.id, now_, config_.lease_ms))) fail(State::exhausted);
+        ++c.discovers;
+        if (s == Scenario::no_dhcp) {
+            if (c.discovers < 3) queue_.push({now_ + (100u << (c.discovers - 1)), index});
+            else fail(State::no_dhcp);
+        }
+        else if (!(c.slot = dhcp_.acquire(c.id, now_, 30))) fail(State::exhausted);
         else next(State::dhcp_offer);
         break;
     case State::dhcp_offer: next(State::dhcp_request); break;
     case State::dhcp_request:
         if (s == Scenario::conflict && c.id % 2 == 0) fail(State::conflict);
-        else { ++c.leases; next(State::dhcp_ack); }
+        else {
+            if (!dhcp_.commit(c.slot, c.id, now_, config_.lease_ms)) throw std::logic_error("Offer no longer owned at ACK");
+            c.expires_at = now_ + config_.lease_ms;
+            ++c.leases; next(State::dhcp_ack);
+        }
         break;
     case State::dhcp_ack: next(State::configured); break;
     case State::configured: if (s == Scenario::bad_ip) fail(State::bad_ip); else next(State::gateway); break;
@@ -147,7 +179,7 @@ void Lab::update(unsigned index) {
         if (s == Scenario::jitter || s == Scenario::unstable) {
             c.metrics.latency_ms += 35; c.metrics.loss_percent = float(5 + rng_() % 25); c.metrics.jitter_ms += 30;
         }
-        if (s == Scenario::expire && c.leases == 1) next(State::online, config_.lease_ms);
+        if (s == Scenario::expire && c.leases == 1) next(State::online, c.expires_at > now_ ? c.expires_at - now_ : 0);
         else if (s == Scenario::unstable) next(State::online, 60);
         else move(c, State::online);
         break;
@@ -178,40 +210,65 @@ void Lab::cancel() {
 std::string Lab::csv() const {
     std::ostringstream out;
     out.imbue(std::locale::classic());
-    out << serialize(config_) << "\nsource,client,simulated_ms,state,leases,latency_ms,jitter_ms,loss_percent,down_mbps,up_mbps,rssi_dbm\n";
+    out << serialize(config_) << "\nsource,client,simulated_ms,state,leases,discovers,latency_ms,jitter_ms,loss_percent,down_mbps,up_mbps,rssi_dbm\n";
     for (const auto& c : clients_) {
         for (unsigned i = 0; i < c.history_size; ++i) {
             const auto m = (i + 1 == c.history_size) ? c.metrics : Metrics{};
             out << "SIMULATED," << c.id << ',' << c.history[i].at_ms << ',' << name(c.history[i].state) << ','
-                << (i + 1 == c.history_size ? c.leases : 0) << ',' << m.latency_ms << ',' << m.jitter_ms << ','
+                << (i + 1 == c.history_size ? c.leases : 0) << ',' << (i + 1 == c.history_size ? c.discovers : 0) << ',' << m.latency_ms << ',' << m.jitter_ms << ','
                 << m.loss_percent << ',' << m.down_mbps << ',' << m.up_mbps << ',' << m.rssi_dbm << '\n';
         }
     }
     return out.str();
 }
-std::vector<Sample> profile(Budget budget, std::stop_token stop) {
+std::string_view name(ProfileEnd end) {
+    constexpr std::array values{"LIMIT_REACHED"sv, "MEMORY_BUDGET"sv, "CPU_BUDGET"sv, "WALL_BUDGET"sv, "CANCELLED"sv};
+    return values.at(static_cast<unsigned>(end));
+}
+unsigned Profile::completed_clients() const {
+    for (auto it = samples.rbegin(); it != samples.rend(); ++it) if (it->within_budget) return it->clients;
+    return 0;
+}
+Profile profile(Budget budget, std::stop_token stop) {
     using Clock = std::chrono::steady_clock;
-    if (!budget.max_clients || budget.max_clients > 50000 || !budget.memory_mib || !budget.wall_ms || !budget.cpu_ms) throw std::invalid_argument("Invalid profiler budget");
+    if (!budget.max_clients || budget.max_clients > 50000 || !budget.memory_mib || budget.memory_mib > 4096 ||
+        !budget.wall_ms || budget.wall_ms > 60000 || !budget.cpu_ms || budget.cpu_ms > 60000) throw std::invalid_argument("Invalid profiler budget");
+    Profile result;
+    if (stop.stop_requested()) return result;
     const auto start = Clock::now(); const auto cpu_start = cpu_ms();
-    const auto remaining = [&] { return !stop.stop_requested() && cpu_ms() - cpu_start < budget.cpu_ms &&
-        Clock::now() - start < std::chrono::milliseconds(budget.wall_ms); };
-    std::vector<Sample> samples;
-    for (unsigned n = 1; remaining(); n = std::min(n * 2, budget.max_clients)) {
-        // Accounted storage is a conservative per-client bound, not process RSS.
-        const std::uint64_t bytes = std::uint64_t{n} * (sizeof(Client) + 128U);
-        if (bytes > std::uint64_t{budget.memory_mib} * 1024 * 1024) break;
+    const auto baseline = resident_bytes();
+    const auto allowance = std::uint64_t{budget.memory_mib} * 1024 * 1024;
+    const auto over = [&](std::uint64_t growth) -> std::optional<ProfileEnd> {
+        if (stop.stop_requested()) return ProfileEnd::cancelled;
+        if (growth > allowance) return ProfileEnd::memory_budget;
+        if (Clock::now() - start >= std::chrono::milliseconds(budget.wall_ms)) return ProfileEnd::wall_budget;
+        if (cpu_ms() - cpu_start >= budget.cpu_ms) return ProfileEnd::cpu_budget;
+        return {};
+    };
+    for (unsigned n = 1;; n = std::min(n * 2, budget.max_clients)) {
+        const std::uint64_t accounted = std::uint64_t{n} * (sizeof(Client) + 128U);
+        if (const auto ended = over(0)) { result.end = *ended; break; }
+        // Reject a plainly over-budget allocation before constructing it; the live budget also uses RSS.
+        if (accounted > allowance) { result.end = ProfileEnd::memory_budget; break; }
         const auto begin = Clock::now(); const auto cpu = cpu_ms();
         Lab lab({n, n, 250, 42, Scenario::healthy});
+        auto peak = resident_bytes();
+        const auto growth = [&] { return peak > baseline ? peak - baseline : 0; };
         std::vector<double> batches;
-        while (!lab.done() && remaining()) {
+        while (!lab.done() && !over(growth())) {
             const auto before = Clock::now(); lab.step(128, stop);
             batches.push_back(std::chrono::duration<double, std::micro>(Clock::now() - before).count());
+            if (batches.size() % 8 == 0) peak = std::max(peak, resident_bytes());
         }
+        peak = std::max(peak, resident_bytes());
+        const auto end = over(growth());
         std::sort(batches.begin(), batches.end());
-        samples.push_back({n, lab.events(), std::chrono::duration<double, std::milli>(Clock::now() - begin).count(),
-            cpu_ms() - cpu, batches.empty() ? 0.0 : batches[(batches.size() - 1) * 95 / 100], bytes, lab.done() && remaining()});
-        if (!samples.back().within_budget || n == budget.max_clients) break;
+        const auto p95_index = batches.empty() ? 0 : (batches.size() * 95 + 99) / 100 - 1;
+        result.samples.push_back({n, lab.events(), std::chrono::duration<double, std::milli>(Clock::now() - begin).count(),
+            cpu_ms() - cpu, batches.empty() ? 0.0 : batches[p95_index], baseline, peak, growth(), accounted, lab.done() && !end});
+        if (end) { result.end = *end; break; }
+        if (n == budget.max_clients) { result.end = ProfileEnd::limit_reached; break; }
     }
-    return samples;
+    return result;
 }
 }

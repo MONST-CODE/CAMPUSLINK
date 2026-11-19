@@ -47,6 +47,14 @@ try {
         Copy-Item -LiteralPath (Join-Path $Root $file) -Destination (Join-Path $stage $file)
     }
     Copy-Item -LiteralPath (Join-Path $Root 'docs\PORTABLE_README.md') -Destination (Join-Path $stage 'README.md')
+    $toolsPath = Join-Path $stage 'tools'
+    $validationPath = Join-Path $stage 'validation'
+    [void][IO.Directory]::CreateDirectory($toolsPath)
+    [void][IO.Directory]::CreateDirectory($validationPath)
+    Copy-Item -LiteralPath (Join-Path $Root 'tools\clp1_server.py') -Destination $toolsPath
+    foreach ($validation in @('audit-windows.ps1', 'validate-win11.ps1', 'verify-release.ps1')) {
+        Copy-Item -LiteralPath (Join-Path $Root ('scripts\' + $validation)) -Destination $validationPath
+    }
     Copy-Item -LiteralPath (Join-Path $Root 'config\test_scope.example.conf') -Destination $config
     Copy-Item -LiteralPath (Join-Path $Root 'third_party\sdl3\LICENSE.txt') -Destination (Join-Path $licenses 'SDL3.txt')
     Copy-Item -LiteralPath (Join-Path $Root 'third_party\imgui\LICENSE.txt') -Destination (Join-Path $licenses 'Dear-ImGui.txt')

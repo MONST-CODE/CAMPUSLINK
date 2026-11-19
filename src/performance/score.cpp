@@ -2,9 +2,48 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <numeric>
 #include <tuple>
 
 namespace campuslink::net {
+Distribution summarize(std::vector<double> samples) {
+    std::erase_if(samples, [](double x) { return !std::isfinite(x) || x < 0; });
+    std::sort(samples.begin(), samples.end());
+    Distribution d;
+    d.count = static_cast<unsigned>(samples.size());
+    if (!d.count) return d;
+    d.mean = std::accumulate(samples.begin(), samples.end(), 0.) / d.count;
+    d.minimum = samples.front(); d.maximum = samples.back();
+    d.median = (samples[(d.count - 1) / 2] + samples[d.count / 2]) / 2.;
+    if (d.count >= 5) d.p95 = samples[(d.count * 95 + 99) / 100 - 1];
+    return d;
+}
+void summarize_observation(Observation& o) {
+    o.rtt_distribution = summarize({o.latency_history.begin(), o.latency_history.end()});
+    o.dns_distribution = summarize(o.dns_history);
+    o.latency_ms = o.rtt_distribution.mean; o.dns_ms = o.dns_distribution.median;
+    if (o.attempts) o.loss_percent = 100. * (o.attempts - o.replies) / o.attempts;
+    if (o.latency_history.size() > 1) {
+        double sum{};
+        for (std::size_t i = 1; i < o.latency_history.size(); ++i) sum += std::abs(o.latency_history[i] - o.latency_history[i - 1]);
+        o.jitter_ms = sum / (o.latency_history.size() - 1);
+    }
+    unsigned sent{}, verified{};
+    o.repeatability.reset();
+    o.sample_complete = !o.transfers.empty();
+    for (const auto& series : o.transfers) {
+        const auto up = summarize(series.up), down = summarize(series.down);
+        sent += series.attempts; verified += std::min(up.count, down.count);
+        if (up.count < 2 || down.count < 2 || series.attempts != up.count || series.attempts != down.count) o.sample_complete = false;
+        // The final (largest requested) transfer size is the score input, never a mix of sizes.
+        o.up_mbps = up.median; o.down_mbps = down.median;
+        o.repeatability.reset();
+        if (down.count >= 2 && down.median && *down.median > 0)
+            o.repeatability = 100. * (1. - std::clamp((*down.maximum - *down.minimum) / *down.median, 0., 1.));
+    }
+    o.endpoint_verified = verified > 0;
+    if (sent && o.attempts) o.stability = std::min({100. * verified / sent, 100. * o.replies / o.attempts, o.repeatability.value_or(100.)});
+}
 Score score(const Observation& o, std::array<double, 5> weights) {
     Score out{};
     const std::array metrics{o.stability, o.down_mbps, o.latency_ms, o.loss_percent, o.jitter_ms};
@@ -24,7 +63,7 @@ Score score(const Observation& o, std::array<double, 5> weights) {
     out.coverage = active / total;
     out.points = active > 0 ? sum / active : 0.;
     out.samples = o.attempts;
-    out.eligible = out.coverage >= .75 && o.attempts >= 3 && o.replies >= 2 && o.endpoint_verified;
+    out.eligible = out.coverage >= .75 && o.attempts >= 3 && o.replies >= 2 && o.endpoint_verified && (o.transfers.empty() || o.sample_complete);
     return out;
 }
 std::vector<Candidate> rank(std::vector<Candidate> candidates, Clock::time_point now) {
@@ -38,7 +77,7 @@ std::vector<Candidate> rank(std::vector<Candidate> candidates, Clock::time_point
 }
 bool should_switch(const Candidate& from, const Candidate& to, Clock::time_point now, Clock::time_point last_switch) {
     using namespace std::chrono_literals;
-    return from.bss.bssid != to.bss.bssid && from.rating.eligible && to.rating.eligible && from.observed <= now &&
+    return from.method == to.method && from.bss.bssid != to.bss.bssid && from.rating.eligible && to.rating.eligible && from.observed <= now &&
         to.observed <= now && now - from.observed <= 5min && now - to.observed <= 5min && now - last_switch >= 60s &&
         to.rating.points >= from.rating.points + 10.;
 }

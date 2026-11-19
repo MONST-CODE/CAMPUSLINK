@@ -32,7 +32,7 @@ struct Client {
     unsigned id{};
     State state{State::created};
     unsigned slot{}; // logical pool index; never a host address
-    unsigned leases{};
+    unsigned leases{}, discovers{}, expires_at{};
     Metrics metrics;
     std::array<Event, 24> history{};
     unsigned history_size{};
@@ -46,6 +46,7 @@ public:
     unsigned acquire(unsigned owner, unsigned now, unsigned duration);
     bool release(unsigned slot, unsigned owner);
     bool valid(unsigned slot, unsigned owner, unsigned now) const;
+    bool commit(unsigned slot, unsigned owner, unsigned now, unsigned duration);
 };
 class Lab {
     struct Item {
@@ -72,6 +73,18 @@ public:
     std::string csv() const;
 };
 struct Budget { unsigned max_clients{10000}, memory_mib{32}, wall_ms{1500}, cpu_ms{900}; };
-struct Sample { unsigned clients, events; double elapsed_ms, cpu_ms, p95_us; std::uint64_t accounted_bytes; bool within_budget; };
-std::vector<Sample> profile(Budget, std::stop_token = {});
+enum class ProfileEnd { limit_reached, memory_budget, cpu_budget, wall_budget, cancelled };
+std::string_view name(ProfileEnd);
+struct Sample {
+    unsigned clients{}, events{};
+    double elapsed_ms{}, cpu_ms{}, p95_us{};
+    std::uint64_t baseline_rss{}, sampled_peak_rss{}, sampled_growth{}, accounted_bytes{};
+    bool within_budget{};
+};
+struct Profile {
+    std::vector<Sample> samples;
+    ProfileEnd end{ProfileEnd::cancelled};
+    unsigned completed_clients() const;
+};
+Profile profile(Budget, std::stop_token = {});
 }

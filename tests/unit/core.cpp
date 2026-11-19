@@ -31,7 +31,7 @@ net::Observation good() {
 }
 struct Mock final : net::Backend {
     net::Interface interface;
-    bool absent{}, failure{}, connect_fail{}, rollback_fail{};
+    bool absent{}, failure{}, connect_fail{}, rollback_fail{}, rollback_wrong_route{};
     unsigned connections{}, scans{}, probes{};
     Mock() {
         interface.id = "wifi0"; interface.up = interface.associated = interface.wireless = true; interface.kind = "Physical (reported)";
@@ -43,7 +43,9 @@ struct Mock final : net::Backend {
     std::optional<net::Error> connect(const net::Bss& b, std::stop_token) override {
         ++connections;
         if ((connect_fail && connections == 1) || (rollback_fail && connections == 2)) return net::Error{"connect", 1460, "Synthetic timeout"};
-        interface.profile = b.profile; interface.bssid = b.bssid; return {};
+        interface.profile = b.profile; interface.bssid = b.bssid;
+        if (rollback_wrong_route && connections == 2) interface.gateway.clear();
+        return {};
     }
     net::Observation measure(const net::Interface&, const net::Scope&, std::stop_token) override {
         ++probes; auto o = good(); o.endpoint_verified = !failure; return o;
@@ -72,6 +74,7 @@ int main() {
                 auto seen = [&](State state) { return std::any_of(c.history.begin(), c.history.begin() + c.history_size, [&](const auto& e) { return e.state == state; }); };
                 require(seen(State::dhcp_offer) && seen(State::dhcp_request) && seen(State::dhcp_ack), "DHCP transition sequence missing");
             }
+            if (s == Scenario::no_dhcp) require(a.clients().front().discovers == 3 && a.now() >= 400, "DHCP backoff not applied");
             if (s == Scenario::weak_signal) require(a.clients().front().metrics.rssi_dbm < -70, "signal scenario did not affect RSSI");
             if (s == Scenario::expire) require(a.clients().front().leases == 2, "lease renewed");
             if (s == Scenario::slow_dns) require(a.now() >= 300, "DNS delay");
@@ -99,10 +102,13 @@ int main() {
         require(rejected([] { sim::parse("CAMPUSLINK_SIM_V1 1 1 80 42 999 garbage"); }), "trailing tokens accepted");
     });
     check("capacity profiler budgets", [] {
-        auto data = sim::profile({100, 1, 1500, 1000});
-        require(!data.empty() && data.back().clients == 100 && data.back().within_budget, "capacity sample missing");
+        auto data = sim::profile({100, 32, 1500, 1000});
+        require(data.completed_clients() == 100 && data.end == sim::ProfileEnd::limit_reached, "configured cap was not identified");
+        require(data.samples.back().baseline_rss > 0 && data.samples.back().sampled_peak_rss > 0, "missing operating system RSS samples");
+        auto small = sim::profile({50000, 1, 1500, 1000});
+        require(small.end == sim::ProfileEnd::memory_budget && small.completed_clients() < 50000, "allocation or RSS cap not respected");
         auto token = std::make_unique<std::stop_source>(); token->request_stop();
-        require(sim::profile({}, token->get_token()).empty(), "capacity cancellation failed");
+        require(sim::profile({}, token->get_token()).end == sim::ProfileEnd::cancelled, "capacity cancellation failed");
     });
     check("score bounded, missingness and eligibility", [] {
         auto o = good(); auto rating = net::score(o);
@@ -163,6 +169,55 @@ int main() {
         Mock mock; mock.connect_fail = mock.rollback_fail = true;
         const auto h = net::select(mock, net::parse_scope(scope_text), target, {});
         require(h.state == "ROLLBACK_FAILED" && h.error && h.error->code == 1460 && mock.connections == 2 && !mock.probes, "bounded rollback failure not reported");
+    });
+    check("distribution and incomplete transfer confidence", [] {
+        auto d = net::summarize({80, 4, 2, 6, 8});
+        require(d.count == 5 && d.median == 6 && d.p95 == 80 && d.mean == 20, "distribution units/percentiles incorrect");
+        require(!net::summarize({3, 2, 1, 0}).p95, "small samples should not imply a percentile");
+        net::Observation o;
+        o.attempts = 6; o.replies = 5; o.latency_history = {1, 3, 6, 2, 1};
+        o.transfers = {{1024, 2, {1, 2}, {2, 3}}, {65536, 2, {15}, {18}}};
+        net::summarize_observation(o);
+        require(o.endpoint_verified && !o.sample_complete && !net::score(o).eligible && o.down_mbps == 18 && o.stability == 75, "partial series must not rank");
+        o.transfers.back().down.push_back(22); o.transfers.back().up.push_back(17);
+        net::summarize_observation(o);
+        require(o.sample_complete && net::score(o).eligible && o.down_mbps == 20 && o.repeatability == 80, "complete largest-size series must be scored");
+    });
+    check("experiment waves enforce explicit permission and device independence", [] {
+        auto a = net::parse_scope(scope_text), b = a;
+        b.bssid.back() = '3'; b.endpoint = "192.0.2.4";
+        auto candidate = target; candidate.bssid = b.bssid; candidate.interface_id = "wifi1";
+        Mock m; auto i = m.interface; i.hardware_interface = true; i.device_instance = "pci0";
+        auto j = i; j.id = "wifi1"; j.device_instance = "pci1";
+        const std::vector jobs{net::Experiment{a,target}, net::Experiment{b,candidate}};
+        require(net::experiment_waves(jobs, {{i,j}, {}}).size() == 1, "independent adapters not scheduled together");
+        j.device_instance = i.device_instance;
+        require(net::experiment_waves(jobs, {{i,j}, {}}).size() == 2, "shared device must serialize");
+        b.endpoint = a.endpoint;
+        j.device_instance = "pci1";
+        require(net::experiment_waves({jobs[0], {b,candidate}}, {{i,j}, {}}).size() == 2, "shared endpoint must serialize");
+        require(rejected([&] { net::experiment_waves({{a,candidate}}, {{i,j}, {}}); }), "unauthorized batch candidate accepted");
+    });
+    check("multi-scope codec, hard caps and comparison identity", [] {
+        auto second = scope_text;
+        second.replace(second.find("00:02"), 5, "00:03");
+        const auto list = net::parse_scopes("\xef\xbb\xbf" + scope_text + "sizes=1024,16384,65536\n---\n" + second);
+        require(list.size() == 2 && list.front().transfer_sizes().size() == 3 && list.front().method() != list.back().method(), "invalid plan fingerprint");
+        require(rejected([] { net::parse_scopes(scope_text + "---\n" + scope_text); }), "duplicate scope accepted");
+        require(rejected([] { net::parse_scope(scope_text + "sizes=8192,1024\n"); }), "descending sizes accepted");
+        require(rejected([] { net::parse_scope(scope_text + "transfer_repetitions=6\n"); }), "over-budget repetition accepted");
+    });
+    check("rollback must verify Windows state and gateway policy", [] {
+        Mock mock; mock.rollback_wrong_route = true;
+        auto scope = net::parse_scope(scope_text + "require_gateway_reply=true\n");
+        const auto h = net::select(mock, scope, target, {});
+        require(!h.rolled_back && h.state == "ROLLBACK_UNVERIFIED" && mock.connections == 2, "rollback reported verified without a route");
+        require(!net::usable_ipv4("169.254.22.3") && !net::usable_ipv4("224.0.0.1") && net::usable_ipv4("192.0.2.1"), "IPv4 validator admitted unusable address");
+    });
+    check("50k logical clients deterministic completion", [] {
+        sim::Lab lab({50000, 50000, 250, 42, Scenario::healthy});
+        while (!lab.done()) lab.step(2048);
+        require(lab.events() == 550000 && lab.clients().back().state == State::online, "logical stress transition loss");
     });
     std::cout << "SUMMARY " << passed << " passed, " << failed << " failed\n";
     return static_cast<int>(failed != 0);

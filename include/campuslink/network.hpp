@@ -15,6 +15,11 @@ struct Interface {
     std::string id, name, description, kind, hardware_id, manufacturer, driver, provider, driver_date;
     std::string address, gateway, dns;
     std::string ssid, bssid, profile, phy, radio;
+    std::string device_instance, active_role, documented_radio;
+    std::optional<unsigned> channel;
+    std::optional<Error> secondary_sta_query;
+    unsigned secondary_sta_bytes{};
+    bool hardware_interface{}, secondary_sta_reported{};
     unsigned index{};
     bool wireless{}, up{}, associated{}, dhcp{};
     double rx_mbps{}, tx_mbps{};
@@ -27,13 +32,27 @@ struct Bss {
 };
 struct Snapshot { std::vector<Interface> interfaces; std::vector<Error> errors; };
 struct Discovery { std::vector<Bss> bss; std::vector<Error> errors; };
+struct Distribution {
+    unsigned count{};
+    std::optional<double> mean, median, p95, minimum, maximum;
+};
+struct TransferSeries {
+    unsigned bytes{}, attempts{};
+    std::vector<double> up, down;
+};
+Distribution summarize(std::vector<double>);
 struct Observation {
-    std::optional<double> stability, down_mbps, latency_ms, loss_percent, jitter_ms, up_mbps, dns_ms;
+    std::optional<double> stability, repeatability, down_mbps, latency_ms, loss_percent, jitter_ms, up_mbps, dns_ms;
     unsigned attempts{}, replies{}, bytes{};
     bool gateway_replied{}, endpoint_verified{};
     std::vector<float> latency_history;
     std::optional<Error> error;
+    std::vector<TransferSeries> transfers;
+    std::vector<double> dns_history;
+    Distribution rtt_distribution, dns_distribution;
+    bool sample_complete{};
 };
+void summarize_observation(Observation&);
 struct Score {
     std::array<std::optional<double>, 5> components;
     double points{}, coverage{};
@@ -47,6 +66,8 @@ struct Candidate {
     Observation observation;
     Score rating;
     Clock::time_point observed;
+    std::string method{};
+    Clock::time_point measurement_start{};
 };
 std::vector<Candidate> rank(std::vector<Candidate> candidates, Clock::time_point now);
 bool should_switch(const Candidate&, const Candidate&, Clock::time_point now, Clock::time_point last_switch);
@@ -54,10 +75,19 @@ struct Scope {
     std::string profile, bssid, endpoint, dns_name;
     unsigned port{}, repetitions{}, bytes{}, timeout_ms{}, cooldown_s{};
     bool rollback{};
+    std::vector<unsigned> sizes;
+    unsigned transfer_repetitions{2}, settle_ms{400};
+    bool require_gateway_reply{};
+    std::string method() const;
+    std::vector<unsigned> transfer_sizes() const;
     bool valid() const;
     bool allows(const Bss&) const;
 };
 Scope parse_scope(std::string_view);
+std::vector<Scope> parse_scopes(std::string_view);
+struct Experiment { Scope scope; Bss candidate; };
+std::vector<std::vector<std::size_t>> experiment_waves(const std::vector<Experiment>&, const Snapshot&);
+bool usable_ipv4(std::string_view);
 struct Diagnostic { std::string step, status, detail; };
 std::vector<Diagnostic> diagnose(const Interface*, bool detected, const Observation*);
 struct Backend {

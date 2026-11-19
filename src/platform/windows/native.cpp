@@ -125,6 +125,8 @@ void pnp(Snapshot& result, std::stop_token stop) {
         const auto id = reg(L"NetCfgInstanceId");
         if (id.empty()) continue;
         for (auto& adapter : result.interfaces) if (equal_id(adapter.id, id)) {
+            wchar_t instance[512]{};
+            if (SetupDiGetDeviceInstanceIdW(set.handle, &data, instance, static_cast<DWORD>(std::size(instance)), nullptr)) adapter.device_instance = utf8(instance);
             adapter.driver = reg(L"DriverVersion"); adapter.provider = reg(L"ProviderName"); adapter.driver_date = reg(L"DriverDate");
             wchar_t props[2048]{};
             if (SetupDiGetDeviceRegistryPropertyW(set.handle, &data, SPDRP_HARDWAREID, nullptr,
@@ -134,7 +136,7 @@ void pnp(Snapshot& result, std::stop_token stop) {
         }
     }
 }
-Snapshot snapshot(std::stop_token stop) {
+Snapshot snapshot(std::stop_token stop, bool details = true) {
     Snapshot out;
     ULONG size = 15 * 1024;
     std::vector<std::max_align_t> storage;
@@ -159,7 +161,10 @@ Snapshot snapshot(std::stop_token stop) {
         MIB_IF_ROW2 row{}; row.InterfaceLuid = a->Luid;
         if (a->IfType == IF_TYPE_SOFTWARE_LOOPBACK) item.kind = "Loopback";
         else if (a->IfType == IF_TYPE_TUNNEL) item.kind = "Tunnel";
-        else if (GetIfEntry2(&row) == NO_ERROR) item.kind = row.InterfaceAndOperStatusFlags.HardwareInterface ? "Physical (reported)" : "Non-hardware (reported)";
+        else if (GetIfEntry2(&row) == NO_ERROR) {
+            item.hardware_interface = row.InterfaceAndOperStatusFlags.HardwareInterface;
+            item.kind = item.hardware_interface ? "Physical (reported)" : "Non-hardware (reported)";
+        }
         else item.kind = "Unknown";
         for (auto* u = a->FirstUnicastAddress; u; u = u->Next) {
             if (u->DadState != IpDadStatePreferred) continue;
@@ -168,8 +173,8 @@ Snapshot snapshot(std::stop_token stop) {
             if (item.address.empty() || item.address.starts_with("169.254.")) item.address = std::move(address);
             if (!item.address.starts_with("169.254.")) break;
         }
-        if (a->FirstGatewayAddress) item.gateway = ip(a->FirstGatewayAddress->Address);
-        if (a->FirstDnsServerAddress) item.dns = ip(a->FirstDnsServerAddress->Address);
+        for (auto* gateway = a->FirstGatewayAddress; gateway && item.gateway.empty(); gateway = gateway->Next) item.gateway = ip(gateway->Address);
+        for (auto* dns = a->FirstDnsServerAddress; dns && item.dns.empty(); dns = dns->Next) item.dns = ip(dns->Address);
         out.interfaces.push_back(std::move(item));
     }
     if (stop.stop_requested()) return out;
@@ -183,22 +188,41 @@ Snapshot snapshot(std::stop_token stop) {
             match->id = std::move(id); match->description = utf8(info.strInterfaceDescription); match->kind = "Unknown";
         }
         match->wireless = true;
-        WLAN_INTERFACE_CAPABILITY* raw{};
-        const auto code = WlanGetInterfaceCapability(wlan.value, &info.InterfaceGuid, nullptr, &raw);
-        const WlanPtr<WLAN_INTERFACE_CAPABILITY> cap(raw);
-        if (code) out.errors.push_back(fail("WlanGetInterfaceCapability", code));
-        else if (cap) for (DWORD j = 0; j < (std::min)(cap->dwNumberOfSupportedPhys, static_cast<DWORD>(WLAN_MAX_PHY_INDEX)); ++j) {
-            if (j) match->phy += ", "; match->phy += phy(cap->dot11PhyTypes[j]);
-        }
-        DWORD radio_status{};
-        if (const auto radio = query<WLAN_RADIO_STATE>(wlan.value, info.InterfaceGuid, wlan_intf_opcode_radio_state, radio_status)) {
-            unsigned on{}, off{};
-            for (DWORD j = 0; j < (std::min)(radio->dwNumberOfPhys, static_cast<DWORD>(WLAN_MAX_PHY_INDEX)); ++j) {
-                const auto& state = radio->PhyRadioState[j];
-                if (state.dot11HardwareRadioState == dot11_radio_state_off || state.dot11SoftwareRadioState == dot11_radio_state_off) ++off;
-                else if (state.dot11HardwareRadioState == dot11_radio_state_on && state.dot11SoftwareRadioState == dot11_radio_state_on) ++on;
+        if (details) {
+            WLAN_INTERFACE_CAPABILITY* raw{};
+            const auto code = WlanGetInterfaceCapability(wlan.value, &info.InterfaceGuid, nullptr, &raw);
+            const WlanPtr<WLAN_INTERFACE_CAPABILITY> cap(raw);
+            if (code) out.errors.push_back(fail("WlanGetInterfaceCapability", code));
+            else if (cap) for (DWORD j = 0; j < (std::min)(cap->dwNumberOfSupportedPhys, static_cast<DWORD>(WLAN_MAX_PHY_INDEX)); ++j) {
+                if (j) match->phy += ", "; match->phy += phy(cap->dot11PhyTypes[j]);
             }
-            if (on || off) match->radio = std::to_string(on) + " on / " + std::to_string(off) + " off PHY entries";
+            DWORD radio_status{};
+            if (const auto radio = query<WLAN_RADIO_STATE>(wlan.value, info.InterfaceGuid, wlan_intf_opcode_radio_state, radio_status)) {
+                unsigned on{}, off{};
+                for (DWORD j = 0; j < (std::min)(radio->dwNumberOfPhys, static_cast<DWORD>(WLAN_MAX_PHY_INDEX)); ++j) {
+                    const auto& state = radio->PhyRadioState[j];
+                    if (state.dot11HardwareRadioState == dot11_radio_state_off || state.dot11SoftwareRadioState == dot11_radio_state_off) ++off;
+                    else if (state.dot11HardwareRadioState == dot11_radio_state_on && state.dot11SoftwareRadioState == dot11_radio_state_on) ++on;
+                }
+                if (on || off) match->radio = std::to_string(on) + " on / " + std::to_string(off) + " off PHY entries";
+            }
+            DWORD status{};
+            if (const auto op = query<ULONG>(wlan.value, info.InterfaceGuid, wlan_intf_opcode_current_operation_mode, status)) {
+                for (const auto& [mask, label] : std::array<std::pair<ULONG, const char*>, 7>{{
+                    {1, "Station"}, {2, "AP"}, {4, "Extensible station"}, {8, "Extensible AP"},
+                    {16, "Wi-Fi Direct device"}, {32, "Wi-Fi Direct group owner"}, {64, "Wi-Fi Direct client"}}}) {
+                    if (*op & mask) { if (!match->active_role.empty()) match->active_role += ", "; match->active_role += label; }
+                }
+            }
+            if (const auto ch = query<ULONG>(wlan.value, info.InterfaceGuid, wlan_intf_opcode_channel_number, status)) match->channel = *ch;
+            // No documented public layout for the returned secondary-STA blob: keep status/size, not a guessed count.
+            void* payload{}; DWORD bytes{};
+            const auto rc = WlanQueryInterface(wlan.value, &info.InterfaceGuid, wlan_intf_opcode_secondary_sta_interfaces,
+                nullptr, &bytes, &payload, nullptr);
+            if (payload) WlanFreeMemory(payload);
+            match->secondary_sta_reported = rc == ERROR_SUCCESS;
+            match->secondary_sta_bytes = rc == ERROR_SUCCESS ? bytes : 0;
+            if (rc) match->secondary_sta_query = fail("WlanQueryInterface(secondary STA)", rc);
         }
         if (info.isState == wlan_interface_state_connected) {
             DWORD status{};
@@ -210,7 +234,13 @@ Snapshot snapshot(std::stop_token stop) {
             } else out.errors.push_back(fail("WlanQueryInterface(current connection)", status));
         }
     }
-    pnp(out, stop);
+    if (details) {
+        pnp(out, stop);
+        for (auto& item : out.interfaces) {
+            if (item.wireless && item.description.find("AX201") != std::string::npos && item.description.find("Intel") != std::string::npos)
+                item.documented_radio = "Intel AX201 documentation: Wi-Fi 6 (802.11ax), 2.4 / 5 GHz, 2x2, up to 160 MHz. Not verified for this unit.";
+        }
+    }
     return out;
 }
 struct ScanNotice {
@@ -271,7 +301,7 @@ std::optional<double> resolve(const Interface& i, const Scope& scope, sockaddr_i
     if (count <= 0 || !dns_confirms(question, std::span(reply.data(), static_cast<std::size_t>(count)), ip_bytes)) return {};
     return std::chrono::duration<double, std::milli>(Clock::now() - begin).count();
 }
-std::optional<std::pair<double,double>> transfer(const Interface& i, const Scope& scope, sockaddr_in source, sockaddr_in target, std::stop_token stop) {
+std::optional<std::pair<double,double>> transfer(const Interface& i, const Scope& scope, unsigned bytes, sockaddr_in source, sockaddr_in target, std::stop_token stop) {
     if (stop.stop_requested()) return {};
     const Socket connection{socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)};
     const auto s = connection.value;
@@ -304,16 +334,21 @@ std::optional<std::pair<double,double>> transfer(const Interface& i, const Scope
         response.resize(offset); return response;
     };
     const auto nonce = static_cast<std::uint64_t>(Clock::now().time_since_epoch().count());
-    std::string payload(scope.bytes, 'x');
+    std::string payload(bytes, 'x');
     for (std::size_t k = 0; k < payload.size(); ++k) payload[k] = static_cast<char>(((nonce >> ((k % 8) * 8)) ^ k) & 0xff);
-    if (!write("CLP1 " + std::to_string(scope.bytes) + "\n") || read(4) != "RDY1") return {};
+    if (!write("CLP1 " + std::to_string(bytes) + "\n") || read(4) != "RDY1") return {};
     const auto start = Clock::now();
     if (!write(payload) || read(4) != "ACK1") return {};
     const auto uploaded = Clock::now();
     if (!write("GO1\n") || read(payload.size()) != payload) return {};
     const auto downloaded = Clock::now();
-    const auto rate = [&](auto duration) { return scope.bytes * 8. / (1e6 * std::max(1e-6, std::chrono::duration<double>(duration).count())); };
+    const auto rate = [&](auto duration) { return bytes * 8. / (1e6 * std::max(1e-6, std::chrono::duration<double>(duration).count())); };
     return std::pair{rate(uploaded - start), rate(downloaded - uploaded)};
+}
+bool settle(std::chrono::milliseconds wait, std::stop_token stop) {
+    const auto until = Clock::now() + wait;
+    while (!stop.stop_requested() && Clock::now() < until) std::this_thread::sleep_for(20ms);
+    return !stop.stop_requested();
 }
 class Windows final : public Backend {
 public:
@@ -398,18 +433,32 @@ public:
             const auto code = WlanConnect(wlan.value, &info.InterfaceGuid, &params, nullptr);
             if (code) return fail("WlanConnect", code);
             const auto end = Clock::now() + 15s;
+            std::string last_ip, last_gateway;
+            bool saw_association{};
             while (Clock::now() < end && !stop.stop_requested()) {
-                const auto current = snapshot(stop);
-                for (const auto& item : current.interfaces) if (equal_id(item.id, b.interface_id) && item.associated &&
-                    item.profile == b.profile && item.bssid == b.bssid && !item.address.empty() && !item.address.starts_with("169.254.") && !item.gateway.empty()) return {};
-                std::this_thread::sleep_for(150ms);
+                const auto current = snapshot(stop, false);
+                const auto match = std::find_if(current.interfaces.begin(), current.interfaces.end(), [&](const auto& item) {
+                    return equal_id(item.id, b.interface_id) && item.associated && item.profile == b.profile && item.bssid == b.bssid;
+                });
+                if (match != current.interfaces.end()) {
+                    saw_association = true;
+                    if (usable_ipv4(match->address) && usable_ipv4(match->gateway)) {
+                        if (match->address == last_ip && match->gateway == last_gateway) return {};
+                        last_ip = match->address; last_gateway = match->gateway;
+                    } else { last_ip.clear(); last_gateway.clear(); }
+                } else { last_ip.clear(); last_gateway.clear(); }
+                if (!settle(300ms, stop)) break;
             }
             if (stop.stop_requested()) {
                 // Cancel the host-owned request when possible; never deauthenticate other stations.
                 WlanDisconnect(wlan.value, &info.InterfaceGuid, nullptr);
                 return fail("WlanConnect cancelled", ERROR_CANCELLED);
             }
-            return Error{"WlanConnect", ERROR_TIMEOUT, "Profile/BSSID or usable host IPv4 not confirmed within 15 s"};
+            // Stop a still pending host connection before allowing a subsequent authorized candidate.
+            WlanDisconnect(wlan.value, &info.InterfaceGuid, nullptr);
+            return Error{"WlanConnect", ERROR_TIMEOUT, saw_association ?
+                "Association observed but Windows did not stabilize usable IPv4 and gateway within 15 s" :
+                "Windows did not confirm requested profile/BSSID within 15 s"};
         }
         return fail("WlanConnect interface", ERROR_NOT_FOUND);
     }
@@ -432,32 +481,49 @@ public:
         if (route_code || route.InterfaceIndex != i.index || best_source.Ipv4.sin_addr.S_un.S_addr != source.sin_addr.S_un.S_addr) {
             o.error = fail("GetBestRoute2 bound IPv4", route_code ? route_code : ERROR_NETWORK_UNREACHABLE); return o;
         }
-        o.dns_ms = resolve(i, scope, source, target.sin_addr, stop);
+        const auto same_link = [&] {
+            const auto observed = snapshot(stop, false);
+            return std::any_of(observed.interfaces.begin(), observed.interfaces.end(), [&](const auto& after) {
+                return after.index == i.index && equal_id(after.id, i.id) && after.bssid == i.bssid &&
+                    after.profile == i.profile && after.address == i.address && after.gateway == i.gateway && after.associated;
+            });
+        };
+        const auto discarded = [] {
+            Observation unavailable;
+            unavailable.error = {"Interface consistency", ERROR_NOT_READY, "Association/address/gateway changed; observations discarded"};
+            return unavailable;
+        };
+        if (!settle(std::chrono::milliseconds(scope.settle_ms), stop) || !same_link()) return discarded();
+        for (unsigned n = 0; n < 3 && !scope.dns_name.empty() && !stop.stop_requested(); ++n)
+            if (const auto latency = resolve(i, scope, source, target.sin_addr, stop)) o.dns_history.push_back(*latency);
         const Icmp ping;
         IN_ADDR gateway{};
-        if (!stop.stop_requested() && InetPtonA(AF_INET, i.gateway.c_str(), &gateway) == 1) o.gateway_replied = echo(ping, source.sin_addr, gateway, 350).has_value();
-        double jitter{}, sum{}, previous{};
+        if (!stop.stop_requested() && InetPtonA(AF_INET, i.gateway.c_str(), &gateway) == 1)
+            o.gateway_replied = echo(ping, source.sin_addr, gateway, 350).has_value();
         for (unsigned n = 0; n < scope.repetitions && !stop.stop_requested() && ping.value != INVALID_HANDLE_VALUE; ++n) {
             ++o.attempts;
             if (const auto response = echo(ping, source.sin_addr, target.sin_addr, (std::min)(scope.timeout_ms, 350u))) {
-                if (o.replies) jitter += std::abs(*response - previous);
-                ++o.replies; sum += *response; previous = *response; o.latency_history.push_back(static_cast<float>(*response));
+                ++o.replies; o.latency_history.push_back(static_cast<float>(*response));
             }
-            if (!stop.stop_requested()) std::this_thread::sleep_for(60ms);
+            if (!settle(60ms, stop)) break;
         }
-        if (o.attempts) { o.stability = 100. * o.replies / o.attempts; o.loss_percent = 100. - *o.stability; }
-        if (o.replies) o.latency_ms = sum / o.replies;
-        if (o.replies > 1) o.jitter_ms = jitter / (o.replies - 1);
-        if (const auto rates = transfer(i, scope, source, target, stop)) {
-            const auto observed = snapshot(stop);
-            const auto same = [&](const Interface& after) { return after.index == i.index && after.id == i.id && after.bssid == i.bssid &&
-                after.profile == i.profile && after.address == i.address && after.associated; };
-            if (std::none_of(observed.interfaces.begin(), observed.interfaces.end(), same)) {
-                o.error = {"Interface consistency", ERROR_NOT_READY, "Interface or association changed during experiment; observations discarded"};
-                Observation unavailable; unavailable.error = o.error; return unavailable;
+        bool first = true;
+        for (const auto size : scope.transfer_sizes()) {
+            TransferSeries series; series.bytes = size;
+            for (unsigned n = 0; n < scope.transfer_repetitions && !stop.stop_requested(); ++n) {
+                if (!first && !settle(1050ms, stop)) break; // Match the supplied endpoint's one-request-per-second ceiling.
+                first = false;
+                if (!same_link()) return discarded();
+                ++series.attempts;
+                if (const auto rates = transfer(i, scope, size, source, target, stop)) {
+                    series.up.push_back(rates->first); series.down.push_back(rates->second); o.bytes += size * 2;
+                }
             }
-            o.endpoint_verified = true; o.up_mbps = rates->first; o.down_mbps = rates->second; o.bytes = scope.bytes * 2;
-        } else o.error = {"CLP1", static_cast<unsigned>(stop.stop_requested() ? ERROR_CANCELLED : ERROR_TIMEOUT), "Bound controlled endpoint did not complete protocol within limits"};
+            o.transfers.push_back(std::move(series));
+        }
+        if (stop.stop_requested() || !same_link()) return discarded();
+        summarize_observation(o);
+        if (!o.endpoint_verified || !o.sample_complete) o.error = {"CLP1", ERROR_TIMEOUT, "One or more controlled transfers did not complete within scope"};
         return o;
     }
 };
