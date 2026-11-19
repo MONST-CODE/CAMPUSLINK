@@ -44,6 +44,7 @@ for config in debug release; do
     "${CXX:-g++}" -pthread "${objs[@]}" -L"$lib" -Wl,-rpath,"$lib" -lSDL3 -o "$work/CampusLink"
     expect_exit 0 env SDL_VIDEO_DRIVER=nonexistent "$work/CampusLink" --self-test
     expect_exit 0 env SDL_VIDEO_DRIVER=nonexistent "$work/CampusLink" --ui-smoke
+    expect_exit 0 "$work/CampusLink" --profile
     expect_exit 2 "$work/CampusLink" --bad-argument
     expect_exit 1 env SDL_VIDEO_DRIVER=nonexistent "$work/CampusLink"
 done

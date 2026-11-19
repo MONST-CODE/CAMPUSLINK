@@ -28,12 +28,32 @@ jobs:
           call build.bat bad-command
           if not "%ERRORLEVEL%"=="2" exit /b 1
           exit /b 0
+      - name: CLP1 loopback protocol test
+        shell: cmd
+        run: python tests\integration\clp1_loopback.py
       - name: Package command
         shell: cmd
         run: call build.bat package
       - name: Build Debug and Release, run tests and verify local release
         shell: cmd
         run: call build.bat release-all
+      - name: Expose build evidence on the check run
+        if: always()
+        shell: powershell
+        run: |
+          if (Test-Path logs/build) {
+            $logs = Get-ChildItem logs/build -Filter '*.log' | Sort-Object LastWriteTime
+            foreach ($log in $logs) {
+              $hits = Get-Content -LiteralPath $log.FullName | Where-Object { $_ -match '(?i)\[FAIL\]|error:|LNK[0-9]+|SUMMARY|Verified SHA-256|Native inventory:|maximum_completed_within_budgets=' } | Select-Object -Last 13
+              foreach ($line in $hits) {
+                $message = $line.Trim().Replace('%','%25')
+                $level = if ($line -match '(?i)\[FAIL\]|error:|LNK[0-9]+') { 'error' } else { 'notice' }
+                Write-Output "::$level title=CAMPUSLINK::$message"
+              }
+            }
+          }
+          $checksum = Get-ChildItem dist/releases -Filter SHA256SUMS.txt -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($checksum) { Get-Content -LiteralPath $checksum.FullName | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY }
       - name: Retain artifacts and evidence
         if: always()
         uses: actions/upload-artifact@v4

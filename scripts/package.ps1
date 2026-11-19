@@ -33,9 +33,10 @@ try {
     foreach ($file in @('CampusLink.exe','SDL3.dll')) {
         Copy-Item -LiteralPath (Join-Path $BinaryDirectory $file) -Destination (Join-Path $stage $file)
     }
-    foreach ($file in @('README.md','VERSION','CHANGELOG.md','THIRD_PARTY_NOTICES.md','deps.lock')) {
+    foreach ($file in @('VERSION','CHANGELOG.md','THIRD_PARTY_NOTICES.md','deps.lock')) {
         Copy-Item -LiteralPath (Join-Path $Root $file) -Destination (Join-Path $stage $file)
     }
+    Copy-Item -LiteralPath (Join-Path $Root 'docs\PORTABLE_README.md') -Destination (Join-Path $stage 'README.md')
     Copy-Item -LiteralPath (Join-Path $Root 'config\test_scope.example.conf') -Destination $config
     Copy-Item -LiteralPath (Join-Path $Root 'third_party\sdl3\LICENSE.txt') -Destination (Join-Path $licenses 'SDL3.txt')
     Copy-Item -LiteralPath (Join-Path $Root 'third_party\imgui\LICENSE.txt') -Destination (Join-Path $licenses 'Dear-ImGui.txt')
@@ -107,7 +108,7 @@ try {
             Copy-Item -LiteralPath $zip -Destination (Join-Path $pending ($key + '.zip'))
             if ((Hash (Join-Path $pending ($key + '.zip'))) -ne $zipHash) { throw 'Release ZIP copy differs' }
             Copy-Item -LiteralPath @($manifestPath, (Join-Path $stage 'BUILD_INFO.json'), (Join-Path $stage 'RELEASE_NOTES.md'), (Join-Path $stage 'deps.lock')) -Destination $pending
-            if ((Hash (Join-Path $pending 'manifest.json')) -ne $manifestHash) { throw 'Release manifesto copy differs' }
+            if ((Hash (Join-Path $pending 'manifest.json')) -ne $manifestHash) { throw 'Release manifest copy differs' }
             Write-Utf8 (Join-Path $pending 'SHA256SUMS.txt') "$zipHash  $key.zip`n$manifestHash  manifest.json`n"
             Write-Utf8 (Join-Path $pending 'RELEASE_REPORT.md') "# Verification for $Version`n`n- Required build and automated tests: PASS`n- Archive payload path list and SHA-256: PASS`n- Extracted SDL and ImGui smoke from a path with spaces: PASS`n- Dell/AX201: NOT_TESTED_ON_HARDWARE`n- Native visible window / WLAN field tests: NOT_RUN`n- Build log: $([IO.Path]::GetFileName($BuildLog))`n"
             Move-Item -LiteralPath $pending -Destination $releasePath

@@ -1,6 +1,6 @@
 # Test plan
 
-- `build.bat test`: native Debug core contracts, SDL window/quit, three ImGui software frames and read-only Windows interface inventory. `release-all` repeats core/smoke tests in both configurations and retests the extracted Release archive.
+- `build.bat test`: native Debug core contracts, SDL window/quit, three ImGui software frames read-only Windows interface inventory and the offline capacity profiler. `release-all` repeats core/smoke tests in both configurations and retests the extracted Release archive.
 - `bash tests/integration/sdl-host-smoke.sh <SDL-include> <SDL-shared-lib-dir>`: GCC direct Debug/Release, core tests, SDL/ImGui headless, argument rejection and invalid video driver rejection. ImGui must be present under `third_party/imgui`. This is not an ABI validation for Windows.
 - `python3 tests/integration/clp1_loopback.py`: local TCP protocol round trip and byte-cap rejection. This does not test Windows WLAN socket binding.
 - Workflow uses a checkout containing a space, `doctor`, invalid command code, `package` and `release-all`, retaining logs and artifacts. Check the [delivery report](reports/FINAL_DELIVERY_REPORT.md) for executed runs and outcomes.

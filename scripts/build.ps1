@@ -167,6 +167,9 @@ try {
 
     $version = (Get-Content -LiteralPath (Join-Path $root 'VERSION') -Raw).Trim()
     if ($version -notmatch '\A\d+\.\d+\.\d+\z') { throw 'VERSION must contain a numeric major.minor.patch version.' }
+    if ($command -eq 'release-all' -and (Test-Path -LiteralPath (Join-Path $root ('dist\releases\v' + $version)))) {
+        throw 'Versioned local release already exists. Preserve or move it before rebuilding.'
+    }
     $configs = if ($command -eq 'release-all') { @('debug','release') } elseif ($command -in @('debug','test')) { @('debug') } else { @('release') }
     $withTests = $command -in @('test','package','release-all')
     $tools = @{}
@@ -328,6 +331,7 @@ try {
                     Invoke-Native $exe @('--self-test')
                     Invoke-Native $exe @('--ui-smoke')
                     Invoke-Native $exe @('--inventory-smoke')
+                    Invoke-Native $exe @('--profile')
                 }
             }
         }

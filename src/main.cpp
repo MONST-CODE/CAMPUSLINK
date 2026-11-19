@@ -3,6 +3,7 @@
 
 #include "campuslink/ui.hpp"
 #include "campuslink/network.hpp"
+#include "campuslink/simulation.hpp"
 
 #include <cstdio>
 #include <memory>
@@ -91,6 +92,26 @@ int run(bool self_test) {
 int main(int argc, char* argv[]) {
     const bool self_test = argc == 2 && std::string_view{argv[1]} == "--self-test";
     const bool ui_test = argc == 2 && std::string_view{argv[1]} == "--ui-smoke";
+    if (argc == 2 && std::string_view{argv[1]} == "--profile") {
+        try {
+            const campuslink::sim::Budget budget;
+            const auto samples = campuslink::sim::profile(budget);
+            std::printf("LOGICAL_SIMULATION_CAPACITY | limits: %u clients, %u MiB accounted, %u ms wall, %u ms process CPU\n",
+                budget.max_clients, budget.memory_mib, budget.wall_ms, budget.cpu_ms);
+            std::puts("clients,transitions,events_per_second,wall_ms,cpu_ms,batch_p95_us,accounted_bytes,status");
+            unsigned capacity{};
+            for (const auto& s : samples) {
+                if (s.within_budget) capacity = s.clients;
+                std::printf("%u,%u,%.1f,%.3f,%.3f,%.3f,%llu,%s\n", s.clients, s.events,
+                    s.elapsed_ms > 0 ? 1000 * s.events / s.elapsed_ms : 0, s.elapsed_ms, s.cpu_ms, s.p95_us,
+                    static_cast<unsigned long long>(s.accounted_bytes), s.within_budget ? "PASS" : "BUDGET_STOP");
+            }
+            std::printf("maximum_completed_within_budgets=%u (offline workload, not radio capacity)\n", capacity);
+            return capacity ? 0 : 1;
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "Profiler: %s\n", e.what()); return 1;
+        }
+    }
     if (argc == 2 && std::string_view{argv[1]} == "--inventory-smoke") {
 #ifdef _WIN32
         const auto snapshot = campuslink::net::platform().inspect({});
@@ -103,7 +124,7 @@ int main(int argc, char* argv[]) {
 #endif
     }
     if (argc != 1 && !self_test && !ui_test) {
-        std::fputs("Usage: CampusLink [--self-test | --ui-smoke | --inventory-smoke]\n", stderr);
+        std::fputs("Usage: CampusLink [--self-test | --ui-smoke | --inventory-smoke | --profile]\n", stderr);
         return 2;
     }
     const int result = self_test ? run(true) : campuslink::ui::run(ui_test);

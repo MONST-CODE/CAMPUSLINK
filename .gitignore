@@ -3,3 +3,5 @@
 /third_party/
 
 /logs/build/
+
+__pycache__/

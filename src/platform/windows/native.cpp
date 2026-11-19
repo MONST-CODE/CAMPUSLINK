@@ -25,6 +25,7 @@ namespace campuslink::net {
 namespace {
 using namespace std::chrono_literals;
 std::string utf8(const wchar_t* wide) {
+    if (!wide) return {};
     const int count = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, -1, nullptr, 0, nullptr, nullptr);
     if (count <= 1) return {};
     std::string text(static_cast<std::size_t>(count), '\0');
