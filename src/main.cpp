@@ -2,6 +2,7 @@
 #include <SDL3/SDL_main.h>
 
 #include "campuslink/ui.hpp"
+#include "campuslink/network.hpp"
 
 #include <cstdio>
 #include <memory>
@@ -90,8 +91,19 @@ int run(bool self_test) {
 int main(int argc, char* argv[]) {
     const bool self_test = argc == 2 && std::string_view{argv[1]} == "--self-test";
     const bool ui_test = argc == 2 && std::string_view{argv[1]} == "--ui-smoke";
+    if (argc == 2 && std::string_view{argv[1]} == "--inventory-smoke") {
+#ifdef _WIN32
+        const auto snapshot = campuslink::net::platform().inspect({});
+        std::printf("Native inventory: %zu interfaces, %zu diagnostics\n", snapshot.interfaces.size(), snapshot.errors.size());
+        for (const auto& e : snapshot.errors) std::printf("%s: %u\n", e.operation.c_str(), e.code);
+        return snapshot.interfaces.empty() ? 1 : 0;
+#else
+        std::fputs("Physical inventory is not available on this platform\n", stderr);
+        return 3;
+#endif
+    }
     if (argc != 1 && !self_test && !ui_test) {
-        std::fputs("Usage: CampusLink [--self-test | --ui-smoke]\n", stderr);
+        std::fputs("Usage: CampusLink [--self-test | --ui-smoke | --inventory-smoke]\n", stderr);
         return 2;
     }
     const int result = self_test ? run(true) : campuslink::ui::run(ui_test);

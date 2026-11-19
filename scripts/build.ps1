@@ -255,7 +255,7 @@ try {
     }
     if ($command -ne 'doctor') {
         $target = '--target=x86_64-pc-windows-msvc'
-        $core = @('src\simulation\lab.cpp','src\network\diagnostics.cpp','src\performance\score.cpp')
+        $core = @('src\simulation\lab.cpp','src\network\diagnostics.cpp','src\network\dns.cpp','src\performance\score.cpp')
         $app = @('src\main.cpp','src\ui\desktop.cpp','src\platform\windows\native.cpp')
         $builds = @{}
         $objRoot = Join-Path $build 'obj'
@@ -327,6 +327,7 @@ try {
                     $exe = Join-Path $bin 'CampusLink.exe'
                     Invoke-Native $exe @('--self-test')
                     Invoke-Native $exe @('--ui-smoke')
+                    Invoke-Native $exe @('--inventory-smoke')
                 }
             }
         }

@@ -1,4 +1,5 @@
 #include "campuslink/network.hpp"
+#include "campuslink/dns.hpp"
 #include "campuslink/simulation.hpp"
 #include <algorithm>
 #include <chrono>
@@ -118,6 +119,15 @@ int main() {
         require(rejected([] { net::parse_scope(scope_text + "port=1\n"); }), "duplicate accepted");
         auto bigger = scope_text; bigger.replace(bigger.find("2048"), 4, "999999");
         require(rejected([&] { net::parse_scope(bigger); }), "over-volume allowed");
+    });
+    check("bounded DNS reply validation", [] {
+        auto query = net::dns_query("bench.lab.example", 0xbeef);
+        auto reply = query; reply[2] = 0x81; reply[3] = 0x80; reply[7] = 1;
+        for (auto v : {192,12,0,1,0,1,0,0,0,20,0,4,192,0,2,3}) reply.push_back(static_cast<std::uint8_t>(v));
+        require(net::dns_confirms(query, reply, {192,0,2,3}), "valid compressed DNS response rejected");
+        require(!net::dns_confirms(query, reply, {192,0,2,4}), "wrong endpoint accepted");
+        reply.pop_back(); require(!net::dns_confirms(query, reply, {192,0,2,3}), "truncated response accepted");
+        require(rejected([] { net::parse_scope(scope_text + "dns_name=not a name\n"); }), "invalid name accepted");
     });
     check("discovery preserves multiple BSS per SSID; APIPA stays hypothesis", [] {
         Mock mock; const auto d = mock.scan({});

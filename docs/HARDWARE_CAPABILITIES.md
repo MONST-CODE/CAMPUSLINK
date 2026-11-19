@@ -1,0 +1,5 @@
+# Hardware and capabilities
+
+Hardware Lab reads Windows interface flags, GUID, interface names, usable IPv4, selected routes/resolvers and driver/PnP details when a device key can be joined. Windows WLAN supplies connected state, current BSSID/link rates, PHY list, radio state, and RSSI where supported. None of those are Internet speed measurements. Missing data is `UNKNOWN`. Capacity fields supplied by Windows or a driver are `DRIVER_REPORTED`; actual successful probes are observations (`MEASURED`) within their method, interface and scope. Association is `CONFIRMED` when the native query reports the active profile and BSSID. Authentication-stage inference is not a packet trace.
+
+`PHYSICAL_WIRELESS_CONCURRENCY` has no default numeric value. The matrix currently exposes STA association evidence and preserves secondary STA and Wi‑Fi Direct combinations as `UNKNOWN`. Radio bands represented by discovery frequencies do not prove every supported combination or width. Use `scripts/audit-windows.ps1` for a local no-scan inventory. Dell Precision 7750, AX201 firmware/driver, secondary STA capability and performance are `NOT_TESTED_ON_HARDWARE` here.

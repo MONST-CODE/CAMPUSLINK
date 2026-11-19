@@ -10,9 +10,11 @@
 #include <objbase.h>
 
 #include "campuslink/network.hpp"
+#include "campuslink/dns.hpp"
 #include <algorithm>
 #include <atomic>
 #include <charconv>
+#include <cstddef>
 #include <cmath>
 #include <cstdio>
 #include <memory>
@@ -126,6 +128,8 @@ void pnp(Snapshot& result, std::stop_token stop) {
             wchar_t props[2048]{};
             if (SetupDiGetDeviceRegistryPropertyW(set.handle, &data, SPDRP_HARDWAREID, nullptr,
                 reinterpret_cast<BYTE*>(props), sizeof props, nullptr)) adapter.hardware_id = utf8(props);
+            if (SetupDiGetDeviceRegistryPropertyW(set.handle, &data, SPDRP_MFG, nullptr,
+                reinterpret_cast<BYTE*>(props), sizeof props, nullptr)) adapter.manufacturer = utf8(props);
         }
     }
 }
@@ -185,6 +189,16 @@ Snapshot snapshot(std::stop_token stop) {
         else if (cap) for (DWORD j = 0; j < (std::min)(cap->dwNumberOfSupportedPhys, static_cast<DWORD>(WLAN_MAX_PHY_INDEX)); ++j) {
             if (j) match->phy += ", "; match->phy += phy(cap->dot11PhyTypes[j]);
         }
+        DWORD radio_status{};
+        if (const auto radio = query<WLAN_RADIO_STATE>(wlan.value, info.InterfaceGuid, wlan_intf_opcode_radio_state, radio_status)) {
+            unsigned on{}, off{};
+            for (DWORD j = 0; j < (std::min)(radio->dwNumberOfPhys, static_cast<DWORD>(WLAN_MAX_PHY_INDEX)); ++j) {
+                const auto& state = radio->PhyRadioState[j];
+                if (state.dot11HardwareRadioState == dot11_radio_state_off || state.dot11SoftwareRadioState == dot11_radio_state_off) ++off;
+                else if (state.dot11HardwareRadioState == dot11_radio_state_on && state.dot11SoftwareRadioState == dot11_radio_state_on) ++on;
+            }
+            if (on || off) match->radio = std::to_string(on) + " on / " + std::to_string(off) + " off PHY entries";
+        }
         if (info.isState == wlan_interface_state_connected) {
             DWORD status{};
             if (const auto connection = query<WLAN_CONNECTION_ATTRIBUTES>(wlan.value, info.InterfaceGuid, wlan_intf_opcode_current_connection, status)) {
@@ -230,6 +244,31 @@ bool ready(SOCKET socket, bool write, Clock::time_point end, std::stop_token sto
         if (code) return code > 0;
     }
     return false;
+}
+std::optional<double> resolve(const Interface& i, const Scope& scope, sockaddr_in source, IN_ADDR endpoint, std::stop_token stop) {
+    if (scope.dns_name.empty() || stop.stop_requested()) return {};
+    const Socket connection{socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)};
+    const auto s = connection.value;
+    const DWORD index = htonl(i.index);
+    sockaddr_in resolver{}; resolver.sin_family = AF_INET; resolver.sin_port = htons(53);
+    if (s == INVALID_SOCKET || InetPtonA(AF_INET, i.dns.c_str(), &resolver.sin_addr) != 1 ||
+        setsockopt(s, IPPROTO_IP, IP_UNICAST_IF, reinterpret_cast<const char*>(&index), sizeof index) ||
+        bind(s, reinterpret_cast<const sockaddr*>(&source), sizeof source) ||
+        ::connect(s, reinterpret_cast<const sockaddr*>(&resolver), sizeof resolver)) return {};
+    u_long nonblocking = 1;
+    if (ioctlsocket(s, FIONBIO, &nonblocking)) return {};
+    const auto begin = Clock::now();
+    const auto question = dns_query(scope.dns_name, static_cast<std::uint16_t>(begin.time_since_epoch().count()));
+    const auto bytes = static_cast<int>(question.size());
+    if (send(s, reinterpret_cast<const char*>(question.data()), bytes, 0) != bytes ||
+        !ready(s, false, begin + std::chrono::milliseconds((std::min)(scope.timeout_ms, 800u)), stop)) return {};
+    std::array<std::uint8_t,512> reply{};
+    const int count = recv(s, reinterpret_cast<char*>(reply.data()), static_cast<int>(reply.size()), 0);
+    const auto parsed = ntohl(endpoint.S_un.S_addr);
+    const std::array ip_bytes{static_cast<std::uint8_t>(parsed >> 24), static_cast<std::uint8_t>(parsed >> 16),
+        static_cast<std::uint8_t>(parsed >> 8), static_cast<std::uint8_t>(parsed)};
+    if (count <= 0 || !dns_confirms(question, std::span(reply.data(), static_cast<std::size_t>(count)), ip_bytes)) return {};
+    return std::chrono::duration<double, std::milli>(Clock::now() - begin).count();
 }
 std::optional<std::pair<double,double>> transfer(const Interface& i, const Scope& scope, sockaddr_in source, sockaddr_in target, std::stop_token stop) {
     if (stop.stop_requested()) return {};
@@ -283,14 +322,16 @@ public:
         Wlan wlan;
         const auto list = interfaces(wlan, out.errors);
         if (!list) return out;
+        const auto scan_deadline = Clock::now() + 12s;
         for (DWORD i = 0; i < list->dwNumberOfItems && !stop.stop_requested(); ++i) {
+            if (Clock::now() >= scan_deadline) { out.errors.push_back(fail("Discovery total budget", ERROR_TIMEOUT)); break; }
             const auto& info = list->InterfaceInfo[i];
             ScanNotice notice{info.InterfaceGuid};
             const auto registered = WlanRegisterNotification(wlan.value, WLAN_NOTIFICATION_SOURCE_ACM, TRUE, ScanNotice::callback, &notice, nullptr, nullptr);
             if (registered) { out.errors.push_back(fail("WlanRegisterNotification", registered)); continue; }
             const auto result = WlanScan(wlan.value, &info.InterfaceGuid, nullptr, nullptr, nullptr);
             if (!result) {
-                const auto end = Clock::now() + 5s;
+                const auto end = std::min(Clock::now() + 5s, scan_deadline);
                 while (!notice.result.load(std::memory_order_acquire) && Clock::now() < end && !stop.stop_requested()) std::this_thread::sleep_for(40ms);
             }
             const auto unregistered = WlanRegisterNotification(wlan.value, WLAN_NOTIFICATION_SOURCE_NONE, TRUE, nullptr, nullptr, nullptr, nullptr);
@@ -390,6 +431,7 @@ public:
         if (route_code || route.InterfaceIndex != i.index || best_source.Ipv4.sin_addr.S_un.S_addr != source.sin_addr.S_un.S_addr) {
             o.error = fail("GetBestRoute2 bound IPv4", route_code ? route_code : ERROR_NETWORK_UNREACHABLE); return o;
         }
+        o.dns_ms = resolve(i, scope, source, target.sin_addr, stop);
         const Icmp ping;
         IN_ADDR gateway{};
         if (!stop.stop_requested() && InetPtonA(AF_INET, i.gateway.c_str(), &gateway) == 1) o.gateway_replied = echo(ping, source.sin_addr, gateway, 350).has_value();
@@ -406,6 +448,13 @@ public:
         if (o.replies) o.latency_ms = sum / o.replies;
         if (o.replies > 1) o.jitter_ms = jitter / (o.replies - 1);
         if (const auto rates = transfer(i, scope, source, target, stop)) {
+            const auto observed = snapshot(stop);
+            const auto same = [&](const Interface& after) { return after.index == i.index && after.id == i.id && after.bssid == i.bssid &&
+                after.profile == i.profile && after.address == i.address && after.associated; };
+            if (std::none_of(observed.interfaces.begin(), observed.interfaces.end(), same)) {
+                o.error = {"Interface consistency", ERROR_NOT_READY, "Interface or association changed during experiment; observations discarded"};
+                Observation unavailable; unavailable.error = o.error; return unavailable;
+            }
             o.endpoint_verified = true; o.up_mbps = rates->first; o.down_mbps = rates->second; o.bytes = scope.bytes * 2;
         } else o.error = {"CLP1", static_cast<unsigned>(stop.stop_requested() ? ERROR_CANCELLED : ERROR_TIMEOUT), "Bound controlled endpoint did not complete protocol within limits"};
         return o;

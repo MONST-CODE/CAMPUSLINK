@@ -57,7 +57,7 @@ bool can_transition(State from, State to) {
     }
 }
 bool Config::valid() const {
-    return clients >= 1 && clients <= 50000 && pool >= 1 && pool <= 50000 && lease_ms >= 80 && lease_ms <= 60000 && scenario < Scenario::count;
+    return clients >= 1 && clients <= 50000 && pool >= 1 && pool <= 50000 && lease_ms >= 80 && lease_ms <= 60000 && static_cast<unsigned>(scenario) < static_cast<unsigned>(Scenario::count);
 }
 std::string serialize(const Config& c) {
     checked(c);

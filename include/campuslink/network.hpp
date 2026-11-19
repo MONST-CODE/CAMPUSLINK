@@ -12,9 +12,9 @@ namespace campuslink::net {
 using Clock = std::chrono::steady_clock;
 struct Error { std::string operation; unsigned code{}; std::string detail; };
 struct Interface {
-    std::string id, name, description, kind, hardware_id, driver, provider, driver_date;
+    std::string id, name, description, kind, hardware_id, manufacturer, driver, provider, driver_date;
     std::string address, gateway, dns;
-    std::string ssid, bssid, profile, phy;
+    std::string ssid, bssid, profile, phy, radio;
     unsigned index{};
     bool wireless{}, up{}, associated{}, dhcp{};
     double rx_mbps{}, tx_mbps{};
@@ -51,7 +51,7 @@ struct Candidate {
 std::vector<Candidate> rank(std::vector<Candidate> candidates, Clock::time_point now);
 bool should_switch(const Candidate&, const Candidate&, Clock::time_point now, Clock::time_point last_switch);
 struct Scope {
-    std::string profile, bssid, endpoint;
+    std::string profile, bssid, endpoint, dns_name;
     unsigned port{}, repetitions{}, bytes{}, timeout_ms{}, cooldown_s{};
     bool rollback{};
     bool valid() const;

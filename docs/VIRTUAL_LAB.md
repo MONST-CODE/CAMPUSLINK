@@ -1,0 +1,7 @@
+# Offline Virtual Lab
+
+The 16 presets cover success, pool exhaustion, DHCP timeout, expiry/renewal, invalid IP, unavailable gateway, slow or failed DNS, weak signal, congestion, jitter/loss, unstable access, logical IP conflict, absent AP, rejected association and denied authentication. Time and logical lease slots never leave the simulation. A client receives an explicit state and bounded history. UI values are always labeled as simulated.
+
+Seeded `std::mt19937`, stable heap tie-breaking by client index and an explicit transition map make runs deterministic across different scheduler batch sizes. The scenario record (`CAMPUSLINK_SIM_V1`) stores seed and parameters. CSV exports include events and final metrics; only final rows carry metric values. Replay rebuilds a fresh simulation from this record. The 50,000-client ceiling is an input guard, not a measured capacity.
+
+The profiler progressively doubles client count, records process CPU, wall time, processed transitions and p95 per 128-event batch, and stops on budgets. Its conservative per-client storage estimate is not RSS or a precise heap measurement. Neither a simulated metric nor a profiler result is a radio capability.

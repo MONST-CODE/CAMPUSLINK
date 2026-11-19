@@ -8,7 +8,8 @@ $temp = Join-Path ([IO.Path]::GetTempPath()) ('CampusLink deps ' + [guid]::NewGu
 [void][IO.Directory]::CreateDirectory($third)
 
 function Get-Verified([string]$Url, [string]$Hash, [string]$Destination) {
-    Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Destination
+    & "$env:SystemRoot\System32\curl.exe" -fsSL --retry 2 --connect-timeout 20 --max-time 180 --output $Destination $Url
+    if ($LASTEXITCODE -ne 0) { throw "Download failed with curl exit code $LASTEXITCODE : $Url" }
     $actual = (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash
     if ($actual -ne $Hash) { throw "Dependency SHA-256 mismatch: $Url" }
     Write-Host "Verified SHA-256 $actual : $Url"

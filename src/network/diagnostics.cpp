@@ -1,4 +1,5 @@
 #include "campuslink/network.hpp"
+#include "campuslink/dns.hpp"
 #include <algorithm>
 #include <charconv>
 #include <stdexcept>
@@ -34,7 +35,7 @@ const Interface* find(const Snapshot& snapshot, const std::string& id) {
 }
 }
 bool Scope::valid() const {
-    return !profile.empty() && profile.size() <= 250 && bssid_format(bssid) && numeric_ipv4(endpoint) &&
+    return !profile.empty() && profile.size() <= 250 && bssid_format(bssid) && numeric_ipv4(endpoint) && (dns_name.empty() || valid_dns_name(dns_name)) &&
         port >= 1 && port <= 65535 && repetitions >= 3 && repetitions <= 8 && bytes >= 1024 && bytes <= 65536 &&
         timeout_ms >= 200 && timeout_ms <= 2000 && cooldown_s >= 30 && cooldown_s <= 3600;
 }
@@ -69,6 +70,7 @@ Scope parse_scope(std::string_view text) {
         else if (key == "bytes") { s.bytes = number(value); bit = 64; }
         else if (key == "timeout_ms") { s.timeout_ms = number(value); bit = 128; }
         else if (key == "cooldown_s") { s.cooldown_s = number(value); bit = 256; }
+        else if (key == "dns_name") { s.dns_name = value; bit = 1024; }
         else if (key == "rollback") {
             if (value != "true" && value != "false") throw std::invalid_argument("Invalid rollback policy");
             s.rollback = value == "true"; bit = 512;
@@ -76,7 +78,7 @@ Scope parse_scope(std::string_view text) {
         if (fields & bit) throw std::invalid_argument("Duplicate scope field");
         fields |= bit;
     }
-    if (fields != 1023 || !version || !s.valid()) throw std::invalid_argument("Missing or invalid scope fields");
+    if ((fields & 1023) != 1023 || !version || !s.valid()) throw std::invalid_argument("Missing or invalid scope fields");
     return s;
 }
 std::vector<Diagnostic> diagnose(const Interface* i, bool detected, const Observation* o) {
@@ -118,6 +120,7 @@ Handoff select(Backend& backend, const Scope& scope, const Bss& candidate, std::
             auto quality = score(observation);
             measured = Candidate{candidate, std::move(observation), quality, Clock::now()};
             if (!measured->observation.endpoint_verified) failure = measured->observation.error.value_or(Error{"validation", 0, "Application endpoint not verified"});
+            else if (!scope.dns_name.empty() && !measured->observation.dns_ms) failure = Error{"validation", 0, "Configured DNS name was not verified on the WLAN resolver"};
         }
     }
     if (stop.stop_requested()) return {"CANCELLED", false, std::move(failure), std::move(measured)};

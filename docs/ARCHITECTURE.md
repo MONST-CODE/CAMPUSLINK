@@ -1,0 +1,7 @@
+# Architecture implemented
+
+`main.cpp` dispatches the SDL, ImGui and Windows inventory smoke tests or opens the desktop. `src/ui/desktop.cpp` owns the window, Vulkan-first SDL GPU renderer and software fallback. Only the UI thread touches those objects. One owned `std::jthread` serializes expensive tasks, publishes snapshots under a mutex and supports cooperative cancellation. Discovery rows, candidate history, logged events and UI client previews are capped. Logs exported as TSV use UTC epoch seconds and avoid active network identifiers.
+
+`include/campuslink/network.hpp` defines the platform contract; `src/platform/windows/native.cpp` implements it with IP Helper, SetupAPI, WLAN and bound ICMP/TCP/optional DNS. Linux hosts use an explicit unavailable adapter; there is no Linux physical Wi‑Fi implementation. `network/diagnostics.cpp` contains strict scope checks, step diagnosis and handoff orchestration; `network/dns.cpp` validates the bounded A-query exchange. `performance/score.cpp` separates measurements, normalization, eligibility and fresh-candidate ranking from the network stack.
+
+`simulation/lab.cpp` is isolated from networking. A min-heap advances simulated time deterministically, with one pending event per active client. A logical lease pool tracks ownership and expiry, without packet transmission or host address changes. The profiler measures simulation wall and process CPU time without assigning simulated clients a physical radio.

@@ -38,6 +38,7 @@ struct View {
     std::array<unsigned, static_cast<unsigned>(sim::State::count)> counts{};
     std::vector<Log> logs;
     unsigned client_count{}, events{}, simulated_ms{};
+    net::Clock::time_point scan_at{}, last_handoff{};
 };
 class Worker {
     mutable std::mutex lock_;
@@ -119,7 +120,7 @@ public:
             last_scan_ = net::Clock::now();
             auto data = net::platform().scan(stop);
             for (const auto& e : data.errors) log("WARN", "discovery", e.operation, e.code);
-            update([&](View& v) { v.discovery = std::move(data); v.status = "Discovery completed; review native status and errors"; });
+            update([&](View& v) { v.discovery = std::move(data); v.scan_at = net::Clock::now(); v.status = "Discovery completed; review native status and errors"; });
         });
     }
     void load_scope() {
@@ -142,7 +143,7 @@ public:
                     if (items.size() >= 64) items.erase(items.begin());
                     items.push_back(std::move(*result.measured));
                 }
-                v.hardware = std::move(hardware); v.status = result.state;
+                v.hardware = std::move(hardware); v.last_handoff = last_physical_; v.status = result.state;
                 if (result.error) v.status += ": " + result.error->detail;
             });
         });
@@ -287,10 +288,14 @@ struct Screen {
             for (const auto& i : view.hardware.interfaces) if (i.wireless) return &i;
             return nullptr;
         }();
+        const auto now = net::Clock::now();
         const auto* latest = view.candidates.empty() ? nullptr : &view.candidates.back();
-        const auto* current = active && latest && active->id == latest->bss.interface_id && active->bssid == latest->bss.bssid &&
-            net::Clock::now() - latest->observed < 5min ? latest : nullptr;
+        const net::Candidate* current{};
+        if (active) for (auto it = view.candidates.rbegin(); it != view.candidates.rend(); ++it) {
+            if (active->id == it->bss.interface_id && active->bssid == it->bss.bssid && now - it->observed < 5min) { current = &*it; break; }
+        }
         const auto* chosen = selected_bss >= 0 && static_cast<std::size_t>(selected_bss) < view.discovery.bss.size() ? &view.discovery.bss[selected_bss] : nullptr;
+        const bool fresh_scan = view.scan_at != net::Clock::time_point{} && now - view.scan_at < 2min;
         const auto* vp = ImGui::GetMainViewport();
         ImGui::SetNextWindowPos(vp->WorkPos); ImGui::SetNextWindowSize(vp->WorkSize);
         ImGui::Begin("CAMPUSLINK", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
@@ -324,7 +329,7 @@ struct Screen {
             for (const auto& i : view.hardware.interfaces) {
                 ImGui::PushID(i.id.c_str());
                 if (ImGui::CollapsingHeader(i.name.empty() ? i.description.c_str() : i.name.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
-                    field("Description", i.description); field("Interface ID", i.id); field("Adapter class", i.kind); field("PnP hardware ID", i.hardware_id);
+                    field("Description", i.description); field("Interface ID", i.id); field("Adapter class", i.kind); field("PnP hardware ID", i.hardware_id); field("Manufacturer", i.manufacturer);
                     field("Driver provider", i.provider); field("Driver version", i.driver); field("Driver date", i.driver_date);
                     field("IPv4", i.address); field("Gateway", i.gateway); field("DNS configuration", i.dns);
                     ImGui::Text("Operational %s | Associated %s | DHCP %s", i.up ? "yes" : "no", i.associated ? "yes" : "unconfirmed", i.dhcp ? "reported" : "not reported");
@@ -336,7 +341,7 @@ struct Screen {
             for (const auto& i : view.hardware.interfaces) {
                 if (i.kind == "Physical (reported)") ++physical;
                 if (!i.wireless) continue;
-                ImGui::SeparatorText(i.description.c_str()); field("PHY (DRIVER_REPORTED)", i.phy); field("Current BSSID", i.bssid);
+                ImGui::SeparatorText(i.description.c_str()); field("PHY (DRIVER_REPORTED)", i.phy); field("Current BSSID", i.bssid); field("Driver-reported radio state", i.radio);
                 metric("RSSI", i.rssi ? std::optional<double>(*i.rssi) : std::nullopt, "dBm");
                 ImGui::Text("Link rates reported: RX %.1f / TX %.1f Mb/s", i.rx_mbps, i.tx_mbps);
             }
@@ -379,6 +384,7 @@ struct Screen {
         case 4:
             ImGui::BeginDisabled(worker.busy()); if (ImGui::Button("Scan Windows WLAN")) { selected_bss = -1; consent = false; worker.scan(); } ImGui::EndDisabled();
             paragraph("Explicit scan. No connection is attempted. Select a BSSID to open Connection Manager.");
+            if (!fresh_scan && !view.discovery.bss.empty()) ImGui::TextColored(amber, "Scan expired. Refresh before connecting.");
             errors(view.discovery.errors);
             if (ImGui::BeginTable("bss", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
                 for (const auto* h : {"SSID", "BSSID", "Signal", "MHz / channel", "Security evidence", "Windows profile"}) ImGui::TableSetupColumn(h);
@@ -397,7 +403,7 @@ struct Screen {
             paragraph("Physical tests are disabled until a valid one-BSSID test_scope.conf is loaded from user data. Use an operator-authorized AP and a controlled CLP1 IPv4 server only.");
             ImGui::BeginDisabled(worker.busy()); if (ImGui::Button("Load test_scope.conf")) { consent = false; worker.load_scope(); } ImGui::EndDisabled();
             if (view.scope) {
-                field("Profile", view.scope->profile); field("BSSID", view.scope->bssid); field("IPv4 endpoint", view.scope->endpoint);
+                field("Profile", view.scope->profile); field("BSSID", view.scope->bssid); field("IPv4 endpoint", view.scope->endpoint); field("Optional controlled DNS name", view.scope->dns_name);
                 ImGui::Text("Port %u | %u ICMP attempts | %u bytes each direction | %u ms transfer timeout | %u s cooldown",
                     view.scope->port, view.scope->repetitions, view.scope->bytes, view.scope->timeout_ms, view.scope->cooldown_s);
             } else ImGui::TextColored(amber, "NO ACTIVE TEST SCOPE");
@@ -424,17 +430,37 @@ struct Screen {
                 ImGui::Text("%.1f / 100 | %.0f%% coverage | %u samples | %s", c.rating.points, c.rating.coverage * 100., c.rating.samples, c.rating.eligible ? "ELIGIBLE" : "LOW CONFIDENCE / STALE");
                 for (unsigned x = 0; x < labels.size(); ++x) metric(labels[x], c.rating.components[x], "/ 100");
             }
-            paragraph("Scoring v1 redistributes missing weights, requires coverage and a verified endpoint. Automatic unattended switching is not enabled.");
+            paragraph("Scoring v1 redistributes missing weights, requires coverage and a verified endpoint. Assisted selection is scoped and operator-triggered.");
             break;
         }
-        case 8:
+        case 8: {
             field("Current Windows profile", active ? active->profile : ""); field("Selected BSSID", chosen ? chosen->bssid : "");
             field("Selected Windows profile", chosen ? chosen->profile : "");
-            paragraph("Manual, one at a time. Windows acquires its own IP. Confirmation authorizes a possible local disconnect and, if enabled, one rollback to the previous profile.");
+            paragraph("Windows obtains its own IP. Confirmation covers a possible local disconnect and, if enabled, one rollback to the previous profile.");
             ImGui::Checkbox("I authorize this scope and possible local connection interruption", &consent);
-            ImGui::BeginDisabled(worker.busy() || !consent || !chosen || !view.scope || !view.scope->allows(*chosen));
+            ImGui::BeginDisabled(worker.busy() || !consent || !fresh_scan || !chosen || !view.scope || !view.scope->allows(*chosen));
             if (ImGui::Button("Connect and validate selected profile")) { worker.handoff(*view.scope, *chosen); consent = false; }
-            ImGui::EndDisabled(); break;
+            ImGui::EndDisabled();
+            std::optional<net::Candidate> recommended;
+            if (current && view.scope && fresh_scan) {
+                auto baseline = *current;
+                auto measured = view.candidates;
+                try {
+                    baseline.rating = net::score(baseline.observation, weights);
+                    for (auto& c : measured) c.rating = net::score(c.observation, weights);
+                    for (const auto& c : net::rank(std::move(measured), now)) {
+                        const auto present = [&](const net::Bss& b) { return b.interface_id == c.bss.interface_id && b.bssid == c.bss.bssid && b.profile == c.bss.profile; };
+                        if (view.scope->allows(c.bss) && std::any_of(view.discovery.bss.begin(), view.discovery.bss.end(), present) &&
+                            net::should_switch(baseline, c, now, view.last_handoff)) { recommended = c; break; }
+                    }
+                } catch (const std::invalid_argument&) { paragraph("Weights are invalid; assisted selection is unavailable."); }
+            }
+            ImGui::BeginDisabled(worker.busy() || !consent || !recommended);
+            if (ImGui::Button("Apply best measured improvement")) { worker.handoff(*view.scope, recommended->bss); consent = false; }
+            ImGui::EndDisabled();
+            paragraph("Assisted selection requires a fresh allowed BSSID, two trusted endpoint observations and a 10-point improvement after cooldown. No background switching.");
+            break;
+        }
         case 9:
             for (const auto& d : net::diagnose(active, !view.discovery.bss.empty(), current ? &current->observation : nullptr)) {
                 ImGui::Text("%-17s %s", d.step.c_str(), d.status.c_str()); paragraph(d.detail);
