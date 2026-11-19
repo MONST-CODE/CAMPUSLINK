@@ -193,8 +193,15 @@ Snapshot snapshot(std::stop_token stop, bool details = true) {
             const auto code = WlanGetInterfaceCapability(wlan.value, &info.InterfaceGuid, nullptr, &raw);
             const WlanPtr<WLAN_INTERFACE_CAPABILITY> cap(raw);
             if (code) out.errors.push_back(fail("WlanGetInterfaceCapability", code));
-            else if (cap) for (DWORD j = 0; j < (std::min)(cap->dwNumberOfSupportedPhys, static_cast<DWORD>(WLAN_MAX_PHY_INDEX)); ++j) {
-                if (j) match->phy += ", "; match->phy += phy(cap->dot11PhyTypes[j]);
+            else if (cap) {
+                match->wlan_interface_type = cap->interfaceType == wlan_interface_type_native_802_11 ? "Native 802.11" :
+                    cap->interfaceType == wlan_interface_type_emulated_802_11 ? "Emulated 802.11" : "Unknown";
+                match->desired_bssids = cap->dwMaxDesiredBssidListSize;
+                match->dot11d_capable = cap->bDot11DSupported != FALSE;
+                for (DWORD j = 0; j < (std::min)(cap->dwNumberOfSupportedPhys, static_cast<DWORD>(WLAN_MAX_PHY_INDEX)); ++j) {
+                    if (j) match->phy += ", ";
+                    match->phy += phy(cap->dot11PhyTypes[j]);
+                }
             }
             DWORD radio_status{};
             if (const auto radio = query<WLAN_RADIO_STATE>(wlan.value, info.InterfaceGuid, wlan_intf_opcode_radio_state, radio_status)) {
@@ -214,6 +221,10 @@ Snapshot snapshot(std::stop_token stop, bool details = true) {
                     if (*op & mask) { if (!match->active_role.empty()) match->active_role += ", "; match->active_role += label; }
                 }
             }
+            if (const auto hosted = query<BOOL>(wlan.value, info.InterfaceGuid, wlan_intf_opcode_hosted_network_capable, status))
+                match->hosted_network_capable = *hosted != FALSE;
+            if (const auto mfp = query<BOOL>(wlan.value, info.InterfaceGuid, wlan_intf_opcode_management_frame_protection_capable, status))
+                match->mfp_capable = *mfp != FALSE;
             if (const auto ch = query<ULONG>(wlan.value, info.InterfaceGuid, wlan_intf_opcode_channel_number, status)) match->channel = *ch;
             // No documented public layout for the returned secondary-STA blob: keep status/size, not a guessed count.
             void* payload{}; DWORD bytes{};
@@ -229,7 +240,7 @@ Snapshot snapshot(std::stop_token stop, bool details = true) {
             if (const auto connection = query<WLAN_CONNECTION_ATTRIBUTES>(wlan.value, info.InterfaceGuid, wlan_intf_opcode_current_connection, status)) {
                 const auto& a = connection->wlanAssociationAttributes;
                 match->associated = true; match->profile = utf8(connection->strProfileName); match->ssid = label(a.dot11Ssid);
-                match->bssid = mac(a.dot11Bssid); match->rx_mbps = a.ulRxRate / 1000.; match->tx_mbps = a.ulTxRate / 1000.;
+                match->bssid = mac(a.dot11Bssid); match->current_phy = phy(a.dot11PhyType); match->rx_mbps = a.ulRxRate / 1000.; match->tx_mbps = a.ulTxRate / 1000.;
                 if (const auto rssi = query<LONG>(wlan.value, info.InterfaceGuid, wlan_intf_opcode_rssi, status)) match->rssi = static_cast<int>(*rssi);
             } else out.errors.push_back(fail("WlanQueryInterface(current connection)", status));
         }

@@ -24,10 +24,10 @@ namespace {
 using namespace std::literals;
 constexpr std::array scenarios{"Healthy"sv,"DHCP pool exhausted"sv,"No DHCP response"sv,"Lease expiry and renewal"sv,
     "Invalid IP"sv,"Gateway unavailable"sv,"Slow DNS"sv,"DNS unavailable"sv,"Weak signal"sv,"Congestion"sv,
-    "Loss and jitter"sv,"Unstable access"sv,"Logical IP conflict"sv,"No access point"sv,"Association rejected"sv,"Authentication denied"sv};
+    "Loss and jitter"sv,"Unstable access"sv,"Logical IP conflict"sv,"No access point"sv,"Association rejected"sv,"Authentication denied"sv,"DHCP renewal before expiry"sv};
 constexpr std::array states{"CREATED"sv,"DISCOVERY"sv,"ASSOCIATION"sv,"AUTHENTICATION"sv,"DHCP_DISCOVER"sv,"DHCP_OFFER"sv,"DHCP_REQUEST"sv,"DHCP_ACK"sv,"CONFIGURED"sv,
     "GATEWAY"sv,"DNS"sv,"ONLINE"sv,"INTERRUPTED"sv,"NO_AP"sv,"ASSOCIATION_REJECTED"sv,"AUTH_DENIED"sv,
-    "DHCP_TIMEOUT"sv,"DHCP_EXHAUSTED"sv,"LOGICAL_CONFLICT"sv,"INVALID_IP"sv,"NO_GATEWAY"sv,"NO_DNS"sv,"CANCELLED"sv};
+    "DHCP_TIMEOUT"sv,"DHCP_EXHAUSTED"sv,"LOGICAL_CONFLICT"sv,"INVALID_IP"sv,"NO_GATEWAY"sv,"NO_DNS"sv,"CANCELLED"sv,"DHCP_RENEW"sv};
 Config checked(Config c) {
     if (!c.valid()) throw std::invalid_argument("Invalid simulation configuration");
     return c;
@@ -61,7 +61,7 @@ std::uint64_t resident_bytes() {
 std::string_view name(State s) { return states.at(static_cast<unsigned>(s)); }
 std::string_view name(Scenario s) { return scenarios.at(static_cast<unsigned>(s)); }
 bool can_transition(State from, State to) {
-    if (to == State::cancelled) return from <= State::online;
+    if (to == State::cancelled) return from <= State::online || from == State::dhcp_renew;
     switch (from) {
     case State::created: return to == State::discovery;
     case State::discovery: return to == State::association || to == State::no_ap;
@@ -74,7 +74,8 @@ bool can_transition(State from, State to) {
     case State::configured: return to == State::gateway || to == State::bad_ip;
     case State::gateway: return to == State::dns || to == State::no_gateway;
     case State::dns: return to == State::online || to == State::no_dns;
-    case State::online: return to == State::dhcp || to == State::interrupted;
+    case State::online: return to == State::dhcp || to == State::interrupted || to == State::dhcp_renew;
+    case State::dhcp_renew: return to == State::online || to == State::no_dhcp;
     default: return false;
     }
 }
@@ -180,11 +181,17 @@ void Lab::update(unsigned index) {
             c.metrics.latency_ms += 35; c.metrics.loss_percent = float(5 + rng_() % 25); c.metrics.jitter_ms += 30;
         }
         if (s == Scenario::expire && c.leases == 1) next(State::online, c.expires_at > now_ ? c.expires_at - now_ : 0);
+        else if (s == Scenario::renew) next(State::online, c.expires_at - config_.lease_ms / 2 - now_);
         else if (s == Scenario::unstable) next(State::online, 60);
         else move(c, State::online);
         break;
+    case State::dhcp_renew:
+        if (!dhcp_.commit(c.slot, c.id, now_, config_.lease_ms)) fail(State::no_dhcp);
+        else { c.expires_at = now_ + config_.lease_ms; ++c.leases; move(c, State::online); }
+        break;
     case State::online:
-        if (s == Scenario::expire) {
+        if (s == Scenario::renew) next(State::dhcp_renew);
+        else if (s == Scenario::expire) {
             if (dhcp_.valid(c.slot, c.id, now_)) throw std::logic_error("Expected expired lease");
             dhcp_.release(c.slot, c.id); c.slot = 0;
             next(State::dhcp);

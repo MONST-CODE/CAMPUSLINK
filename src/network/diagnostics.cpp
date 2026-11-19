@@ -197,8 +197,12 @@ Handoff select(Backend& backend, const Scope& scope, const Bss& candidate, std::
         }
     }
     const bool cancelled = stop.stop_requested();
-    if (!failure && !cancelled) return {"HOST_VALIDATED", false, {}, std::move(measured)};
-    if (cancelled && !failure) failure = Error{"handoff", 0, "Operator cancelled the experiment"};
+    if (!failure && !cancelled && measured) {
+        measured->host_validated = true;
+        return {"HOST_VALIDATED", false, {}, std::move(measured)};
+    }
+    if (measured) measured->rating.eligible = false;
+    if (!failure) failure = Error{"handoff", 0, cancelled ? "Operator cancelled the experiment" : "No validated observation"};
     // Cleanup is a single bounded native connection attempt. Cancellation stops all probes
     // and new trials, but does not interrupt restoration of this interface's captured profile.
     if (changing && scope.rollback && previous.associated && !previous.profile.empty() && usable_ipv4(previous.address)) {

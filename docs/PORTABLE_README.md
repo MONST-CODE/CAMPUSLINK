@@ -4,6 +4,6 @@ Extract the full archive to a folder you can write to. Run `CampusLink.exe` next
 
 1. Open **Virtual Client Lab** to run a deterministic offline scenario. All client metrics there are simulated.
 2. Use **Hardware Lab** to inspect driver-reported information and **Network Discovery** to request a WLAN scan. Windows location policy can limit the result.
-3. To run a real experiment, read [USER_GUIDE.md](USER_GUIDE.md) and prepare your own authorized `test_scope.conf` from `config/test_scope.example.conf`. No experiment is active by default.
+3. To run a real experiment, read [USER_GUIDE.md](USER_GUIDE.md) and prepare your own authorized `test_scope.conf` from `config/test_scope.example.conf`. No experiment is active by default. See [network diagnostics](NETWORK_DIAGNOSTICS.md) and [Windows 11 verification](WINDOWS11_VALIDATION.md).
 
 [Build information](BUILD_INFO.json) · [Runtime imports](RUNTIME_IMPORTS.txt) · [Release notes](RELEASE_NOTES.md) · [Third-party notices](THIRD_PARTY_NOTICES.md)

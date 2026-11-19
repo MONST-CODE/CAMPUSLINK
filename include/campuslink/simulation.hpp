@@ -11,10 +11,10 @@
 
 namespace campuslink::sim {
 enum class Scenario { healthy, pool, no_dhcp, expire, bad_ip, no_gateway, slow_dns, no_dns,
-    weak_signal, congestion, jitter, unstable, conflict, no_ap, rejected, auth_denied, count };
+    weak_signal, congestion, jitter, unstable, conflict, no_ap, rejected, auth_denied, renew, count };
 enum class State { created, discovery, association, authentication, dhcp, dhcp_offer, dhcp_request, dhcp_ack, configured, gateway, dns,
     online, interrupted, no_ap, rejected, auth_denied, no_dhcp, exhausted, conflict, bad_ip,
-    no_gateway, no_dns, cancelled, count };
+    no_gateway, no_dns, cancelled, dhcp_renew, count };
 std::string_view name(State);
 std::string_view name(Scenario);
 bool can_transition(State from, State to);

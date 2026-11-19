@@ -37,6 +37,7 @@ struct View {
     std::vector<std::string> outcomes;
     std::vector<net::Candidate> candidates;
     std::vector<sim::Client> clients;
+    std::shared_ptr<const std::vector<sim::Client>> completed_clients;
     std::optional<sim::Profile> capacity;
     std::array<unsigned, static_cast<unsigned>(sim::State::count)> counts{};
     std::vector<Log> logs;
@@ -161,6 +162,12 @@ public:
                     if (result.error) log("WARN", "handoff", result.error->operation, result.error->code);
                     unsafe_state = unsafe_state || result.state == "ROLLBACK_FAILED" || result.state == "ROLLBACK_UNVERIFIED";
                     update([&](View& v) {
+                        if (!result.measured && result.state != "CANCELLED" && result.state != "SCOPE_BLOCKED") {
+                            const auto& attempted = requested[wave[j]];
+                            net::Observation failure;
+                            failure.error = result.error;
+                            result.measured = net::Candidate{attempted.candidate, std::move(failure), {}, net::Clock::now(), attempted.scope.method()};
+                        }
                         if (result.measured) {
                             if (result.state == "HOST_VALIDATED" && result.measured->observation.sample_complete)
                                 validated.emplace_back(result.measured->measurement_start, result.measured->observed);
@@ -186,7 +193,7 @@ public:
     }
     void clear_lab() {
         if (!busy()) update([](View& v) {
-            v.clients.clear(); v.counts = {}; v.events = v.client_count = v.simulated_ms = 0;
+            v.clients.clear(); v.completed_clients.reset(); v.counts = {}; v.events = v.client_count = v.simulated_ms = 0;
             v.status = "In-memory logical clients removed; saved exports unchanged";
         });
     }
@@ -194,7 +201,7 @@ public:
         run("SIMULATED Virtual Lab", [this, config, replay, export_csv](auto stop) mutable {
             if (replay) config = sim::parse(read("last-scenario.txt", 128));
             sim::Lab lab(config);
-            update([](View& v) { v.clients.clear(); v.counts = {}; v.events = v.client_count = v.simulated_ms = 0; });
+            update([](View& v) { v.clients.clear(); v.completed_clients.reset(); v.counts = {}; v.events = v.client_count = v.simulated_ms = 0; });
             const auto publish = [&] {
                 decltype(View::counts) counts{};
                 for (const auto& c : lab.clients()) ++counts[static_cast<unsigned>(c.state)];
@@ -213,7 +220,11 @@ public:
                 write("last-scenario.txt", sim::serialize(config));
                 write("virtual-lab.csv", lab.csv());
             }
-            update([&](View& v) { v.status = stop.stop_requested() ? "SIMULATED run cancelled" : "SIMULATED run complete"; });
+            auto completed = std::make_shared<const std::vector<sim::Client>>(lab.clients());
+            update([&](View& v) {
+                v.completed_clients = std::move(completed);
+                v.status = stop.stop_requested() ? "SIMULATED run cancelled" : "SIMULATED run complete";
+            });
         });
     }
     void profile(sim::Budget budget) {
@@ -311,6 +322,7 @@ void errors(const std::vector<net::Error>& list) {
     }
 }
 void field(const char* name, const std::string& v) { ImGui::Text("%s: %s", name, v.empty() ? "UNKNOWN" : v.c_str()); }
+std::string reported(std::optional<bool> value) { return !value ? "" : *value ? "Yes" : "No"; }
 void metric(const char* name, std::optional<double> v, const char* unit) {
     if (v) ImGui::Text("%-18s %8.2f %s", name, *v, unit); else ImGui::Text("%-18s UNVERIFIED", name);
 }
@@ -318,7 +330,7 @@ void number_input(const char* label, unsigned& v) { ImGui::InputScalar(label, Im
 struct Screen {
     int page{}, selected_bss{-1};
     bool export_csv{}, consent{}, light{}, warnings_only{};
-    unsigned logical_selected{};
+    unsigned logical_selected{}, logical_page{1};
     std::vector<net::Bss> batch;
     int measurement_offset{};
     ImGuiTextFilter discovery_filter;
@@ -339,7 +351,7 @@ struct Screen {
         const auto* latest = view.candidates.empty() ? nullptr : &view.candidates.back();
         const net::Candidate* current{};
         if (active) for (auto it = view.candidates.rbegin(); it != view.candidates.rend(); ++it) {
-            if (active->id == it->bss.interface_id && active->bssid == it->bss.bssid && now - it->observed < 5min) { current = &*it; break; }
+            if (active->id == it->bss.interface_id && active->bssid == it->bss.bssid && active->profile == it->bss.profile && now - it->observed < 5min) { current = &*it; break; }
         }
         const auto* chosen = selected_bss >= 0 && static_cast<std::size_t>(selected_bss) < view.discovery.bss.size() ? &view.discovery.bss[selected_bss] : nullptr;
         const auto authorized = [&](const net::Bss& b) -> const net::Scope* {
@@ -374,8 +386,8 @@ struct Screen {
             field("Renderer", display.mode); if (!display.warning.empty()) paragraph(display.warning);
             field("Active wireless interface", active ? active->description : "");
             field("Associated SSID", active ? active->ssid : "");
-            field("Authorized application endpoint", current && current->observation.endpoint_verified ? "Verified" : "");
-            metric("Connection score", current && current->rating.coverage ? std::optional<double>(current->rating.points) : std::nullopt, "/ 100");
+            field("Authorized application endpoint", current && current->host_validated && current->observation.endpoint_verified ? "Verified" : "");
+            metric("Connection score", current && current->host_validated && current->rating.coverage ? std::optional<double>(current->rating.points) : std::nullopt, "/ 100");
             ImGui::Text("Interfaces: %zu   BSS: %zu   Offline events: %u", view.hardware.interfaces.size(), view.discovery.bss.size(), view.events);
             ImGui::BeginDisabled(worker.busy()); if (ImGui::Button("Refresh hardware")) worker.inspect(); ImGui::EndDisabled();
             errors(view.hardware.errors); break;
@@ -403,6 +415,10 @@ struct Screen {
                 }
                 ImGui::SeparatorText(i.description.c_str()); field("PHY (DRIVER_REPORTED)", i.phy);
                 field("Active role (OS report)", i.active_role); field("Driver-reported radio state", i.radio);
+                field("WLAN interface type (reported)", i.wlan_interface_type); field("Associated PHY (reported)", i.current_phy);
+                field("802.11d supported", reported(i.dot11d_capable)); field("Management frame protection", reported(i.mfp_capable));
+                field("Legacy Hosted Network capability", reported(i.hosted_network_capable));
+                if (i.desired_bssids) ImGui::Text("Desired BSSID list limit: %u (selection list, not STA capacity)", *i.desired_bssids);
                 if (i.channel && *i.channel) ImGui::Text("Current channel (driver reported): %u", *i.channel);
                 if (!i.documented_radio.empty()) paragraph("DOCUMENTED MODEL: " + i.documented_radio);
                 field("Observed association", i.bssid);
@@ -435,17 +451,23 @@ struct Screen {
                 ImGui::EndCombo();
             }
             ImGui::Checkbox("Record scenario and CSV history", &export_csv);
-            ImGui::BeginDisabled(!config.valid()); if (ImGui::Button("Start offline lab")) { logical_selected = 0; worker.lab(config, false, export_csv); } ImGui::EndDisabled();
-            ImGui::SameLine(); if (ImGui::Button("Replay last saved seed")) { logical_selected = 0; worker.lab(config, true, export_csv); }
-            ImGui::SameLine(); if (ImGui::Button("Clear logical clients")) { logical_selected = 0; worker.clear_lab(); }
+            ImGui::BeginDisabled(!config.valid()); if (ImGui::Button("Start offline lab")) { logical_selected = 0; logical_page = 1; worker.lab(config, false, export_csv); } ImGui::EndDisabled();
+            ImGui::SameLine(); if (ImGui::Button("Replay last saved seed")) { logical_selected = 0; logical_page = 1; worker.lab(config, true, export_csv); }
+            ImGui::SameLine(); if (ImGui::Button("Clear logical clients")) { logical_selected = 0; logical_page = 1; worker.clear_lab(); }
             ImGui::EndDisabled();
             ImGui::SameLine(); ImGui::BeginDisabled(!worker.busy() || !view.status.starts_with("SIMULATED Virtual Lab"));
             if (ImGui::Button(worker.paused() ? "Resume" : "Pause")) worker.pause();
             ImGui::EndDisabled();
             ImGui::Text("%u clients | %u transitions | simulated time %u ms", view.client_count, view.events, view.simulated_ms);
             for (unsigned j = 0; j < view.counts.size(); ++j) if (view.counts[j]) { ImGui::Text("%s: %u", sim::name(static_cast<sim::State>(j)).data(), view.counts[j]); }
-            if (logical_selected && logical_selected <= view.clients.size()) {
-                const auto& c = view.clients[logical_selected - 1];
+            const auto& clients = view.completed_clients ? *view.completed_clients : view.clients;
+            constexpr unsigned page_size = 120;
+            const auto pages_total = std::max(1u, (static_cast<unsigned>(clients.size()) + page_size - 1) / page_size);
+            if (pages_total > 1) { number_input("Client page", logical_page); ImGui::SameLine(); ImGui::Text("/ %u", pages_total); }
+            else if (worker.busy() && !view.clients.empty()) text("Live preview; all clients are inspectable after the run.");
+            logical_page = std::clamp(logical_page, 1u, pages_total);
+            if (logical_selected && logical_selected <= clients.size()) {
+                const auto& c = clients[logical_selected - 1];
                 ImGui::SeparatorText("Selected logical client history");
                 ImGui::Text("Client %u | %u discover attempts | %u ACKs", c.id, c.discovers, c.leases);
                 for (unsigned i = 0; i < c.history_size; ++i) ImGui::Text("%6u ms  %s", c.history[i].at_ms, sim::name(c.history[i].state).data());
@@ -453,7 +475,9 @@ struct Screen {
             if (ImGui::BeginTable("clients", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
                 for (const auto* h : {"Logical ID", "State", "Lease count", "Latency (sim. ms)", "Loss (sim. %)", "RSSI (sim. dBm)"}) ImGui::TableSetupColumn(h);
                 ImGui::TableHeadersRow();
-                for (const auto& c : view.clients) {
+                const auto first = (logical_page - 1) * page_size;
+                for (auto i = first; i < std::min<std::size_t>(first + page_size, clients.size()); ++i) {
+                    const auto& c = clients[i];
                     ImGui::TableNextRow(); ImGui::TableNextColumn();
                     if (ImGui::Selectable(std::to_string(c.id).c_str(), logical_selected == c.id)) logical_selected = c.id;
                     ImGui::TableNextColumn(); text(sim::name(c.state));
@@ -507,6 +531,7 @@ struct Screen {
                 const auto& record = view.candidates[view.candidates.size() - 1 - measurement_offset];
                 const auto& o = record.observation;
                 field("Scope", record.method); field("BSSID", record.bss.bssid);
+                field("Host validation", record.host_validated ? "PASS" : "NOT VERIFIED (not eligible for handoff)");
                 ImGui::TextColored(o.sample_complete ? cyan : amber, "%s | ICMP replies %u/%u | completed payload %u B", o.sample_complete ? "COMPLETE TRANSFERS" : "INSUFFICIENT SAMPLES", o.replies, o.attempts, o.bytes);
                 metric("Mean RTT", o.latency_ms, "ms"); metric("Median RTT", o.rtt_distribution.median, "ms"); metric("p95 RTT", o.rtt_distribution.p95, "ms");
                 metric("Mean abs jitter", o.jitter_ms, "ms"); metric("ICMP misses", o.loss_percent, "%"); metric("DNS median", o.dns_ms, "ms");
@@ -534,7 +559,7 @@ struct Screen {
             constexpr std::array labels{"Reachability", "Downstream", "RTT", "ICMP misses", "Jitter"};
             for (unsigned x = 0; x < labels.size(); ++x) ImGui::InputDouble(labels[x], &weights[x], 1., 5., "%.0f");
             auto ranked = view.candidates;
-            try { for (auto& c : ranked) c.rating = net::score(c.observation, weights); }
+            try { for (auto& c : ranked) c.rating = net::candidate_score(c, weights); }
             catch (const std::invalid_argument& e) { paragraph(e.what()); break; }
             for (const auto& c : net::rank(std::move(ranked), net::Clock::now())) {
                 ImGui::SeparatorText(c.bss.bssid.c_str());
@@ -569,12 +594,12 @@ struct Screen {
             if (ImGui::Button("Run authorized queue")) { worker.experiments(std::move(planned)); batch.clear(); consent = false; }
             ImGui::EndDisabled();
             std::optional<net::Candidate> recommended;
-            if (current && fresh_scan) {
+            if (current && fresh_scan && authorized(current->bss) && authorized(current->bss)->method() == current->method) {
                 auto baseline = *current;
                 auto measured = view.candidates;
                 try {
-                    baseline.rating = net::score(baseline.observation, weights);
-                    for (auto& c : measured) c.rating = net::score(c.observation, weights);
+                    baseline.rating = net::candidate_score(baseline, weights);
+                    for (auto& c : measured) c.rating = net::candidate_score(c, weights);
                     for (const auto& c : net::rank(std::move(measured), now)) {
                         const auto* scope = authorized(c.bss);
                         if (scope && scope->method() == c.method && present(c.bss) &&

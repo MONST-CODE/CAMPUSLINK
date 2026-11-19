@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <numeric>
 #include <tuple>
+#include <map>
 
 namespace campuslink::net {
 Distribution summarize(std::vector<double> samples) {
@@ -66,8 +67,25 @@ Score score(const Observation& o, std::array<double, 5> weights) {
     out.eligible = out.coverage >= .75 && o.attempts >= 3 && o.replies >= 2 && o.endpoint_verified && (o.transfers.empty() || o.sample_complete);
     return out;
 }
+Score candidate_score(const Candidate& candidate, std::array<double, 5> weights) {
+    auto rating = score(candidate.observation, weights);
+    rating.eligible = rating.eligible && candidate.host_validated;
+    return rating;
+}
 std::vector<Candidate> rank(std::vector<Candidate> candidates, Clock::time_point now) {
-    for (auto& c : candidates) if (c.observed > now || now - c.observed > std::chrono::minutes(5)) c.rating.eligible = false;
+    using Key = std::tuple<std::string, std::string, std::string, std::string>;
+    const auto key = [](const Candidate& c) { return Key{c.bss.interface_id, c.bss.bssid, c.bss.profile, c.method}; };
+    std::map<Key, std::size_t> newest;
+    for (std::size_t i = 0; i < candidates.size(); ++i) {
+        if (candidates[i].observed > now) continue;
+        auto [it, inserted] = newest.try_emplace(key(candidates[i]), i);
+        if (!inserted && candidates[it->second].observed <= candidates[i].observed) it->second = i;
+    }
+    for (std::size_t i = 0; i < candidates.size(); ++i) {
+        auto& c = candidates[i];
+        const auto it = newest.find(key(c));
+        if (!c.host_validated || it == newest.end() || it->second != i || now - c.observed > std::chrono::minutes(5)) c.rating.eligible = false;
+    }
     std::stable_sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
         if (a.rating.eligible != b.rating.eligible) return a.rating.eligible;
         if (a.rating.points != b.rating.points) return a.rating.points > b.rating.points;
@@ -77,7 +95,8 @@ std::vector<Candidate> rank(std::vector<Candidate> candidates, Clock::time_point
 }
 bool should_switch(const Candidate& from, const Candidate& to, Clock::time_point now, Clock::time_point last_switch) {
     using namespace std::chrono_literals;
-    return from.method == to.method && from.bss.bssid != to.bss.bssid && from.rating.eligible && to.rating.eligible && from.observed <= now &&
+    return from.host_validated && to.host_validated && !from.method.empty() && from.method == to.method &&
+        from.bss.interface_id == to.bss.interface_id && from.bss.bssid != to.bss.bssid && from.rating.eligible && to.rating.eligible && from.observed <= now &&
         to.observed <= now && now - from.observed <= 5min && now - to.observed <= 5min && now - last_switch >= 60s &&
         to.rating.points >= from.rating.points + 10.;
 }

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1 — Validation and lab operability
+
+- Assisted handoff requires a host-validated result on the same interface. The latest failed measurement supersedes older successful measurements for that interface, BSSID and method.
+- Browse all completed logical clients in pages, inspect individual histories and replay a new in-place DHCP renewal scenario without restarting discovery.
+- Expose current PHY, the 802.11 interface type, 802.11d, frame-protection and legacy Hosted Network reports without treating them as simultaneous STA evidence.
+- Include network diagnostics in the portable guide and enforce the required operator-kit files during verification.
+
 ## 0.2.0 — Product completion candidate
 
 - Native radio evidence now distinguishes vendor documentation, driver reports, active OS associations and validated trial windows. Secondary STA returns a native result, not an inferred ceiling.

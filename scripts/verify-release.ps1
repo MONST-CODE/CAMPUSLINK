@@ -30,7 +30,14 @@ try {
             if ($itemHash -cne $file.sha256) { throw "SHA-256 mismatch: $path" }
         }
     } finally { $sha.Dispose() }
-    foreach ($name in @('CampusLink.exe','SDL3.dll','BUILD_INFO.json','RUNTIME_IMPORTS.txt','VERSION','THIRD_PARTY_NOTICES.md')) {
+    $required = @('CampusLink.exe','SDL3.dll','BUILD_INFO.json','RUNTIME_IMPORTS.txt','VERSION','THIRD_PARTY_NOTICES.md',
+        'README.md','deps.lock','config/test_scope.example.conf','licenses/SDL3.txt','licenses/Dear-ImGui.txt')
+    # Historical archives retain their original layout. Check the complete operator kit for new packages.
+    if ([version]$manifest.version -ge [version]'0.2.1') {
+        $required += @('USER_GUIDE.md','BUILD_RELEASE.md','WINDOWS11_VALIDATION.md','NETWORK_DIAGNOSTICS.md',
+            'tools/clp1_server.py','validation/audit-windows.ps1','validation/validate-win11.ps1','validation/verify-release.ps1')
+    }
+    foreach ($name in $required) {
         if (-not $seen.ContainsKey($name)) { throw "Required payload absent: $name" }
     }
     if ($ReleaseFolder) {

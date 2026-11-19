@@ -15,10 +15,12 @@ struct Interface {
     std::string id, name, description, kind, hardware_id, manufacturer, driver, provider, driver_date;
     std::string address, gateway, dns;
     std::string ssid, bssid, profile, phy, radio;
-    std::string device_instance, active_role, documented_radio;
+    std::string device_instance, active_role, documented_radio, current_phy, wlan_interface_type;
     std::optional<unsigned> channel;
     std::optional<Error> secondary_sta_query;
     unsigned secondary_sta_bytes{};
+    std::optional<unsigned> desired_bssids;
+    std::optional<bool> mfp_capable, dot11d_capable, hosted_network_capable;
     bool hardware_interface{}, secondary_sta_reported{};
     unsigned index{};
     bool wireless{}, up{}, associated{}, dhcp{};
@@ -68,7 +70,9 @@ struct Candidate {
     Clock::time_point observed;
     std::string method{};
     Clock::time_point measurement_start{};
+    bool host_validated{};
 };
+Score candidate_score(const Candidate&, std::array<double, 5> weights = base_weights);
 std::vector<Candidate> rank(std::vector<Candidate> candidates, Clock::time_point now);
 bool should_switch(const Candidate&, const Candidate&, Clock::time_point now, Clock::time_point last_switch);
 struct Scope {

@@ -84,6 +84,19 @@ int main() {
             if (s == Scenario::jitter) require(a.clients().front().metrics.jitter_ms > 10, "jitter not observed");
         });
     }
+    check("DHCP renewal retains a slot without restarting DORA", [] {
+        const sim::Config config{1, 1, 80, 42, Scenario::renew};
+        require(sim::parse(sim::serialize(config)) == config, "renewal scenario cannot be replayed");
+        sim::Lab lab(config);
+        while (lab.clients().front().state != State::online) lab.step(1);
+        const auto before = lab.clients().front();
+        require(before.leases == 1 && before.slot == 1, "initial lease missing");
+        while (!lab.done()) lab.step(1);
+        const auto& client = lab.clients().front();
+        require(client.state == State::online && client.leases == 2 && client.discovers == 1 && client.slot == before.slot &&
+            client.history[client.history_size - 2].state == State::dhcp_renew && lab.now() < before.expires_at &&
+            client.expires_at > before.expires_at, "renewal restarted acquisition or did not extend the existing lease");
+    });
     check("transition contract", [] { require(sim::can_transition(State::created, State::discovery) && !sim::can_transition(State::created, State::online), "wrong transition table"); });
     check("pool capacity and lease ownership/expiry", [] {
         sim::DhcpSimulator leases(1);
@@ -122,11 +135,28 @@ int main() {
     });
     check("ranking freshness, cooldown and hysteresis", [] {
         const auto now = net::Clock::now();
-        auto a = net::Candidate{target, good(), net::score(good()), now - 1min};
+        auto a = net::Candidate{target, good(), net::score(good()), now - 1min, "comparable", {}, true};
         auto b = a; b.bss.bssid.back() = '3'; a.rating.points = 65; b.rating.points = 80;
         require(net::should_switch(a, b, now, now - 2min) && !net::should_switch(a, b, now, now - 5s), "cooldown/hysteresis failed");
         b.observed -= 6min;
         require(net::rank({b, a}, now).front().bss.bssid == a.bss.bssid, "stale candidate won");
+    });
+    check("handoff ranks only the latest host-validated same-interface evidence", [] {
+        const auto now = net::Clock::now();
+        const net::Candidate base{target, good(), net::score(good()), now - 1min, "method", {}, true};
+        auto a = base; a.rating.points = 50;
+        auto b = base; b.bss.bssid.back() = '3';
+        auto rejected = b; rejected.observed += 5s; rejected.host_validated = false;
+        require(!net::candidate_score(rejected).eligible && !net::should_switch(a, rejected, now, now - 2min), "failed host validation became eligible after reweighting");
+        const auto ranked = net::rank({b, rejected, a}, now);
+        require(ranked.front().bss.bssid == a.bss.bssid && !ranked[1].rating.eligible && !ranked[2].rating.eligible,
+            "older successful sample survived a newer failed attempt");
+        b.bss.interface_id = "wifi2";
+        require(!net::should_switch(a, b, now, now - 2min), "independent interface treated as a same-interface replacement");
+        Mock mock;
+        const auto result = net::select(mock, net::parse_scope(scope_text + "require_gateway_reply=true\n"), target, {});
+        require(result.rolled_back && result.measured && result.measured->observation.endpoint_verified &&
+            !result.measured->host_validated && !result.measured->rating.eligible, "CLP1 success overrode failed gateway policy");
     });
     check("scope strict validation", [] {
         const auto s = net::parse_scope(scope_text);
