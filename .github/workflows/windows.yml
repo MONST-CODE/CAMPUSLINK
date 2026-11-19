@@ -37,14 +37,33 @@ jobs:
       - name: Build Debug and Release, run tests and verify local release
         shell: cmd
         run: call build.bat release-all
+      - name: Verify clean preserves the package and evidence
+        shell: cmd
+        run: |
+          call build.bat clean
+          if errorlevel 1 exit /b 1
+          if exist build\bin exit /b 1
+          if exist build\obj exit /b 1
+          if not exist logs\build exit /b 1
+          if not exist dist\packages\*.zip exit /b 1
+          for /f "usebackq delims=" %%v in ("VERSION") do if not exist "dist\releases\v%%v\SHA256SUMS.txt" exit /b 1
       - name: Expose build evidence on the check run
         if: always()
         shell: powershell
         run: |
+          $checksum = Get-ChildItem dist/releases -Filter SHA256SUMS.txt -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($checksum) {
+            foreach ($line in (Get-Content -LiteralPath $checksum.FullName)) {
+              Write-Output "::notice title=Verified release SHA-256::$line"
+              Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value $line
+            }
+            $info = Get-Content -LiteralPath (Join-Path $checksum.DirectoryName 'BUILD_INFO.json') -Raw | ConvertFrom-Json
+            Write-Output "::notice title=Build tools::Windows SDK $($info.sdk); VC $($info.vcToolset); $($info.compiler -split [Environment]::NewLine | Select-Object -First 1)"
+          }
           if (Test-Path logs/build) {
-            $logs = Get-ChildItem logs/build -Filter '*.log' | Sort-Object LastWriteTime
+            $logs = Get-ChildItem logs/build -Filter '*.log' | Sort-Object LastWriteTime -Descending
             foreach ($log in $logs) {
-              $hits = Get-Content -LiteralPath $log.FullName | Where-Object { $_ -match '(?i)\[FAIL\]|error:|LNK[0-9]+|SUMMARY|Verified SHA-256|Verified package:|SHA256:|Native inventory:|maximum_completed_within_budgets=' } | Select-Object -Last 13
+              $hits = Get-Content -LiteralPath $log.FullName | Where-Object { $_ -match '(?i)\[FAIL\]|error:|LNK[0-9]+|SUMMARY|Verified SHA-256|Native inventory:|maximum_completed_within_budgets=' } | Select-Object -Last 13
               foreach ($line in $hits) {
                 $message = $line.Trim().Replace('%','%25')
                 $level = if ($line -match '(?i)\[FAIL\]|error:|LNK[0-9]+') { 'error' } else { 'notice' }
@@ -52,8 +71,6 @@ jobs:
               }
             }
           }
-          $checksum = Get-ChildItem dist/releases -Filter SHA256SUMS.txt -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($checksum) { Get-Content -LiteralPath $checksum.FullName | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY }
       - name: Retain artifacts and evidence
         if: always()
         uses: actions/upload-artifact@v4
