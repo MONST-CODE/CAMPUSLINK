@@ -1,0 +1,44 @@
+name: Windows x64
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: windows-2022
+    timeout-minutes: 35
+    defaults:
+      run:
+        working-directory: Campus Link
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: Campus Link
+          persist-credentials: false
+      - name: Install hash-verified SDL3, ImGui and LLVM
+        shell: powershell
+        run: .\scripts\setup-deps.ps1 -InstallPinnedLLVM
+      - name: Validate environment
+        shell: cmd
+        run: call build.bat doctor
+      - name: Verify invalid command exit code
+        shell: cmd
+        run: |
+          call build.bat bad-command
+          if not "%ERRORLEVEL%"=="2" exit /b 1
+          exit /b 0
+      - name: Package command
+        shell: cmd
+        run: call build.bat package
+      - name: Build Debug and Release, run tests and verify local release
+        shell: cmd
+        run: call build.bat release-all
+      - name: Retain artifacts and evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: campuslink-windows-x64
+          path: |
+            Campus Link/dist/releases/
+            Campus Link/logs/build/
