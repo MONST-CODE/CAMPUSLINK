@@ -23,6 +23,8 @@ Date : 2026-11-19 UTC. [PR #2 vers `main`](https://github.com/MONST-CODE/CAMPUSL
 
 ## Package Windows x64
 
+La [préversion GitHub `v0.2.0`](https://github.com/MONST-CODE/CAMPUSLINK/releases/tag/v0.2.0) est publiée, non stable. Le tag pointe vers le commit testé `ae4c788`. Le ZIP, le manifeste, `SHA256SUMS.txt` et les journaux Windows sont des fichiers attachés ; la validation matérielle ne fait pas partie de cette publication.
+
 - [Artefact CI 14568234921](https://github.com/MONST-CODE/CAMPUSLINK/actions/runs/44604849536/artifacts/14568234921), 3 561 512 octets, expiration 2027-02-17 20:04:19 UTC. C’est l’enveloppe Actions, pas le ZIP portable.
 - `CAMPUSLINK-0.2.0-windows-x64-portable.zip`, 1 778 177 octets : `40d6edee86e0905d7f043ee17623724a1702788d77266cd5e546438c281e5278`.
 - `manifest.json` : `aef227283ca85c3f38398e7538cac0960c4159b91678dbe70bb799ea0f409188`.
