@@ -12,6 +12,9 @@ imgui="$root/third_party/imgui"
 work=$(mktemp -d "${TMPDIR:-/tmp}/campuslink test.XXXXXX")
 trap 'rm -rf -- "$work"' EXIT
 version=$(<"$root/VERSION")
+revision=$(git -C "$root" rev-parse --short=12 HEAD)
+mkdir -p "$work/assets"
+cp -R "$root/assets/fonts" "$work/assets/"
 expect_exit() {
     local want=$1 output rc=0
     shift
@@ -26,7 +29,7 @@ for config in debug release; do
     flags=(-O0 -g)
     if [[ $config == release ]]; then flags=(-O2 -DNDEBUG); fi
     echo "=== $config Linux host ==="
-    common=(-std=c++20 -pthread "${flags[@]}" "-DCAMPUSLINK_VERSION=$version" -Iinclude -isystem "$headers" -isystem "$imgui" -isystem "$imgui/backends")
+    common=(-std=c++20 -pthread "${flags[@]}" "-DCAMPUSLINK_VERSION=$version" "-DCAMPUSLINK_BUILD=$revision" -Iinclude -isystem "$headers" -isystem "$imgui" -isystem "$imgui/backends")
     objs=()
     for source in "${core[@]}" src/main.cpp src/platform/unavailable.cpp src/ui/desktop.cpp tests/unit/core.cpp; do
         obj="$work/${source//\//_}.o"
@@ -42,6 +45,9 @@ for config in debug release; do
         objs+=("$obj")
     done
     "${CXX:-g++}" -pthread "${objs[@]}" -L"$lib" -Wl,-rpath,"$lib" -lSDL3 -o "$work/CampusLink"
+    metadata=$("$work/CampusLink" --version)
+    [[ "$metadata" == "CAMPUSLINK $version | $revision | "* ]]
+    printf '%s\n' "$metadata"
     expect_exit 0 env SDL_VIDEO_DRIVER=nonexistent "$work/CampusLink" --self-test
     expect_exit 0 env SDL_VIDEO_DRIVER=nonexistent "$work/CampusLink" --ui-smoke
     expect_exit 0 "$work/CampusLink" --profile

@@ -1,4 +1,5 @@
 #include "campuslink/network.hpp"
+#include "campuslink/ui_text.hpp"
 #include "campuslink/dns.hpp"
 #include "campuslink/simulation.hpp"
 #include <algorithm>
@@ -57,6 +58,33 @@ struct Mock final : net::Backend {
 }
 int main() {
     using sim::Scenario; using sim::State;
+    check("bilingual UI catalog, composed diagnostics and French UTF-8", [] {
+        using namespace campuslink::ui;
+        require(catalog_complete() && catalog.size() >= 350, "incomplete UI translation catalog");
+        require(std::string_view(translate(Language::fr, Key::About)) == "À propos" &&
+            std::string_view(translate(Language::en, Key::About)) == "About", "language switch or Unicode labels invalid");
+        require(localize(Language::fr, "Hardware inventory running") == "Inventaire matériel en cours", "worker state did not translate");
+        require(localize(Language::fr, "Gateway did not answer; required by operator scope; rollback failed: WlanConnect / 31").ends_with(" ; retour arrière en échec : WlanConnect / 31"),
+            "native diagnostic fragments were not localized or lost status codes");
+        for (const auto& d : net::diagnose(nullptr, false, nullptr))
+            require(localize(Language::fr, d.detail) != d.detail, "untranslated diagnostic");
+    });
+    check("display settings round trip, overwrite and corruption fallback", [] {
+        using namespace campuslink::ui;
+        const auto stamp = std::to_string(net::Clock::now().time_since_epoch().count());
+        struct Cleanup { std::filesystem::path path; ~Cleanup() { std::error_code ec; std::filesystem::remove_all(path, ec); } } temp{
+            std::filesystem::temp_directory_path() / ("CampusLink settings " + stamp)};
+        require(std::filesystem::create_directory(temp.path), "could not create isolated settings test folder");
+        const auto file = temp.path / "display-v1.conf";
+        const auto defaults = load_preferences(file);
+        require(!defaults.invalid && defaults.value.language == Language::fr && defaults.value.theme == Theme::light, "incorrect first-run defaults");
+        const Preferences alternate{Language::en, Theme::dark, Typeface::mono, 21, true, 960, 600};
+        require(save_preferences(file, alternate) && load_preferences(file).value == alternate, "selected appearance not persisted");
+        require(save_preferences(file, defaults.value) && load_preferences(file).value == defaults.value, "restore settings did not replace existing file");
+        std::ofstream(file) << "invalid\n";
+        require(load_preferences(file).invalid && load_preferences(file).value == defaults.value, "corrupt config did not fall back");
+        require(!decode(encode(alternate) + "junk"), "accepted trailing settings data");
+    });
     for (const auto& [s, expected] : std::array{
         std::pair{Scenario::healthy, State::online}, std::pair{Scenario::pool, State::exhausted},
         std::pair{Scenario::no_dhcp, State::no_dhcp}, std::pair{Scenario::expire, State::online},

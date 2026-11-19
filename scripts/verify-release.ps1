@@ -15,6 +15,9 @@ try {
     try { $manifest = $reader.ReadToEnd() | ConvertFrom-Json } finally { $reader.Dispose() }
     if ($manifest.platform -cne 'Windows' -or $manifest.architecture -cne 'x64' -or $manifest.abi -cne 'MSVC' -or
         $manifest.configuration -cne 'Release' -or $manifest.version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid manifest target' }
+    if ([version]$manifest.version -ge [version]'0.3.0' -and @($zip.Entries | Where-Object { $_.FullName.Contains('\') }).Count) {
+        throw 'ZIP entry uses a Windows path separator'
+    }
     if ($zip.Entries.Count -ne $manifest.files.Count + 1) { throw 'ZIP/manifest count mismatch' }
     $sha = [Security.Cryptography.SHA256]::Create()
     $seen = @{}
@@ -36,6 +39,9 @@ try {
     if ([version]$manifest.version -ge [version]'0.2.1') {
         $required += @('USER_GUIDE.md','BUILD_RELEASE.md','WINDOWS11_VALIDATION.md','NETWORK_DIAGNOSTICS.md',
             'tools/clp1_server.py','validation/audit-windows.ps1','validation/validate-win11.ps1','validation/verify-release.ps1')
+    }
+    if ([version]$manifest.version -ge [version]'0.3.0') {
+        $required += @('assets/fonts/Inter.ttf','assets/fonts/JetBrainsMono.ttf','LICENSES/Inter-OFL.txt','LICENSES/JetBrainsMono-OFL.txt')
     }
     foreach ($name in $required) {
         if (-not $seen.ContainsKey($name)) { throw "Required payload absent: $name" }
