@@ -24,6 +24,8 @@ for key in re.findall(r'Key::(\w+)', ui):
     assert key in items, f'Unknown key: {key}'
 # Widget IDs and user data can be literal/dynamic; visible static properties belong in the catalog.
 for line in ui.splitlines():
+    assert not re.search(r'ImGui::TextColored\(palette\(color_theme\)\.\w+, tr\(Key::\w+\)\)', line), \
+        'Use a literal format for colored translated text without arguments'
     for label in re.findall(r'ImGui::(?:Button|SmallButton|SeparatorText|Checkbox|SliderInt|TableSetupColumn)\("([^"\\]+)"', line):
         assert label.startswith('##'), f'Unlocalized visible widget label: {label}'
 print(f'PASS: {len(items)} keys, both translations, checked format strings and static widget labels')

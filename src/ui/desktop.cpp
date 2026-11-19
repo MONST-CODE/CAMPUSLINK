@@ -564,7 +564,7 @@ struct Screen {
             }
             for (const auto band : observed_bands) ImGui::Text(tr(Key::SGhzObservedInScan), band == 24 ? "2.4" : band == 5 ? "5" : "6");
             ImGui::Text(tr(Key::IdentifiedPhysicalWlanDevicesZu), physical.size(), associated.size());
-            ImGui::TextColored(palette(color_theme).caution, tr(Key::PhysicalWirelessCapacityCeilingUnknown));
+            ImGui::TextColored(palette(color_theme).caution, "%s", tr(Key::PhysicalWirelessCapacityCeilingUnknown));
             if (view.overlapping_validated_windows) ImGui::Text(tr(Key::VerifiedPairedExperimentWindowsU), view.overlapping_validated_windows);
             else text(tr(Key::ConcurrentPhysicalTrialsNotVerified));
             paragraph(tr(Key::AWindowsSnapshotIsNot));
@@ -622,7 +622,7 @@ struct Screen {
         case 4:
             ImGui::BeginDisabled(worker.busy()); if (ImGui::Button(tr(Key::ScanWindowsWlan))) { selected_bss = -1; consent = false; batch.clear(); worker.scan(); } ImGui::EndDisabled();
             paragraph(tr(Key::ExplicitScanNoConnectionIs));
-            if (!fresh_scan && !view.discovery.bss.empty()) ImGui::TextColored(palette(color_theme).caution, tr(Key::ScanExpiredRefreshBeforeConnecting));
+            if (!fresh_scan && !view.discovery.bss.empty()) ImGui::TextColored(palette(color_theme).caution, "%s", tr(Key::ScanExpiredRefreshBeforeConnecting));
             errors(view.discovery.errors);
             discovery_filter.Draw(tr(Key::FilterSsidBssidOrProfile));
             if (ImGui::BeginTable("bss", 6, ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollX | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingFixedFit, {0, 295 * dpi})) {
@@ -646,7 +646,7 @@ struct Screen {
         case 5:
             paragraph(tr(Key::LoadTestScopeConfWith));
             ImGui::BeginDisabled(worker.busy()); if (ImGui::Button(tr(Key::LoadTestScopeConf))) { consent = false; batch.clear(); worker.load_scope(); } ImGui::EndDisabled();
-            if (view.scopes.empty()) ImGui::TextColored(palette(color_theme).caution, tr(Key::NoActiveTestScope));
+            if (view.scopes.empty()) ImGui::TextColored(palette(color_theme).caution, "%s", tr(Key::NoActiveTestScope));
             for (const auto& scope : view.scopes) {
                 ImGui::SeparatorText(scope.bssid.c_str()); field(tr(Key::WindowsProfile), scope.profile); field(tr(Key::Method), scope.method());
                 field(tr(Key::ControlledDnsName), scope.dns_name);
@@ -683,7 +683,7 @@ struct Screen {
                 }
                 paragraph(tr(Key::Clp1LabGoodputIncludesProtocol));
                 if (o.error) errors({*o.error});
-            } else ImGui::TextColored(palette(color_theme).muted, tr(Key::NoAuthorizedEndpointObservationsYet));
+            } else ImGui::TextColored(palette(color_theme).muted, "%s", tr(Key::NoAuthorizedEndpointObservationsYet));
             break;
         case 7: {
             const std::array labels{tr(Key::Reachability), tr(Key::Downstream), tr(Key::Rtt), tr(Key::IcmpMisses), tr(Key::Jitter)};
@@ -887,7 +887,7 @@ int run(bool smoke, bool graphics) {
         display.frame();
         ImGui::PushFont(io.FontDefault, static_cast<float>(prefs.size));
         if (smoke && frames == 0) {
-            for (const auto face : {fonts.inter, fonts.mono}) {
+            for (const auto face : {fonts.inter, fonts.mono, fonts.fallback}) {
                 auto* baked = face->GetFontBaked(16);
                 for (const auto code : {0x00e9, 0x00e0, 0x00e7, 0x0153, 0x2019})
                     if (!baked->FindGlyphNoFallback(static_cast<ImWchar>(code))) {

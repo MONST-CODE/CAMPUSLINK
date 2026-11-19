@@ -49,7 +49,7 @@ struct Fonts {
     void load() {
         auto& atlas = *ImGui::GetIO().Fonts;
         fallback = atlas.AddFontDefault();
-        const auto load_file = [&](const char* relative) -> ImFont* {
+        const auto load_file = [&](const char* relative, const ImFontConfig* config = nullptr, const ImWchar* ranges = nullptr) -> ImFont* {
             const auto* root = SDL_GetBasePath();
             if (!root) return nullptr;
             const auto file = std::string(root) + relative;
@@ -59,10 +59,18 @@ struct Fonts {
             if (!length || length > 4 * 1024 * 1024) { SDL_free(data); return nullptr; }
             auto* owned = IM_ALLOC(length);
             SDL_memcpy(owned, data, length); SDL_free(data);
-            return atlas.AddFontFromMemoryTTF(owned, static_cast<int>(length), 16);
+            return atlas.AddFontFromMemoryTTF(owned, static_cast<int>(length), 16, config, ranges);
         };
         inter = load_file("assets/fonts/Inter.ttf");
         mono = load_file("assets/fonts/JetBrainsMono.ttf");
+        // Keep the embedded fallback usable for French even outside the bitmap's character coverage.
+        if (inter) {
+            static constexpr ImWchar french_glyphs[]{0x0080, 0x017f, 0x2000, 0x206f, 0};
+            ImFontConfig merge;
+            merge.MergeMode = true;
+            merge.DstFont = fallback;
+            load_file("assets/fonts/Inter.ttf", &merge, french_glyphs);
+        }
     }
     ImFont* choose(Typeface face) const {
         const auto selected = face == Typeface::mono ? mono : face == Typeface::inter ? inter : fallback;

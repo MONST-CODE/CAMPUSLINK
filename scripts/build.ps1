@@ -258,7 +258,7 @@ try {
     }
     if ($command -ne 'doctor') {
         $target = '--target=x86_64-pc-windows-msvc'
-        $buildRevision = & git.exe -C $root rev-parse --short=12 HEAD
+        $buildRevision = & git.exe -C $root rev-parse '--short=12' HEAD
         if ($LASTEXITCODE -ne 0 -or $buildRevision -notmatch '^[0-9a-f]{12}$') { throw 'Unable to identify the build commit' }
         $fontRoot = Join-Path $root 'assets\fonts'
         $fontLock = (Get-Content -LiteralPath (Join-Path $root 'deps.lock') -Raw | ConvertFrom-Json).fonts
