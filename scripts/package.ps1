@@ -2,6 +2,7 @@
 param([Parameter(Mandatory)][string]$Root, [string]$Version, [string]$BinaryDirectory,
       [string]$Compiler, [string]$BuildLog, [switch]$ReleaseAll)
 $ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $dist = Join-Path $Root 'dist'
 $packages = Join-Path $dist 'packages'
