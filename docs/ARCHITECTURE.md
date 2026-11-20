@@ -11,3 +11,18 @@
 The Wi-Fi policy ranks only compatible observations and caps requests independently of lab scopes. It snapshots the current adapter before each mutation and validates it afterwards. Association/IP timing comes from Native Wi-Fi polling; NLM reporting is not active probing. Recovery is limited to one native restoration per ordinary/assisted operation. Recent targeted outcomes are capped and expire in memory. The session cannot become a background handoff service.
 
 Path measurements inspect an already active WLAN adapter and run only a selected CLP1 scope (`observe_path`). They never invoke association or rollback. They reject changed interface/address/profile/BSSID/gateway evidence and keep endpoint-specific figures separate from the lab scheduler. The SDL panel publishes revised worker snapshots only; unchanged snapshots are not deep-copied on idle refresh. See [ADR 0002](decisions/0002-connectivity-evidence.md) for the decision not to ship a relay, gateway or system transport in this build.
+
+## 0.4.2: connection reliability and workspace
+
+```text
+UI (desktop.cpp: Screen + widgets.hpp + appearance.hpp tokens)
+  │ commands                         ▲ View snapshots (revisioned copy), WifiProgress stages
+  ▼                                  │
+Worker (one std::jthread, cooperative stop)
+  ├─ scan()/inspect()  → Backend::scan / inspect / reachability (NLM, portal flag)
+  ├─ wifi()            → connect_wifi (diagnostics.cpp: plan, retry policy, restore, Internet settle)
+  │                         └─ Backend::request_wifi → native join(): ACM notifications, phase budgets
+  └─ lab tasks         → select / observe_path (CLP1), sim::Lab, lab::compare (offline)
+```
+
+Pure policy lives in `src/network/diagnostics.cpp` and is unit-tested with mock backends: `wifi_plan`, `recommend_start`, `classify_wlan_reason`, `display_ssid`, `connect_wifi`. The Windows backend (`native.cpp`) only observes and requests; the UI draws only states the engine published. Rendering is event-driven (see ADR 0003). The state machine and the multipath component split are in [ADR 0003](decisions/0003-connection-reliability-and-workspace.md).
