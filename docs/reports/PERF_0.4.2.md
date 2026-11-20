@@ -12,6 +12,7 @@ Launched minimized without focus, 5 s settle, CPU time sampled over 10 s, proces
 | 0.4.1 official package | 100.0 / 99.7 (two runs) | 83.2 MB |
 | 0.4.1 source, MinGW dev build | 99.8 | 84.4 MB |
 | 0.4.2 MinGW dev build | **0.6** | 81.9 MB |
+| 0.4.2 official package (CI, `60cfb93`) | **0.3** | 81.9 MB |
 
 Cause in 0.4.x: with the Vulkan (SDL GPU) path, a minimized window returns no swapchain texture and the loop never waits. 0.4.2 waits for events when idle and does not render while minimized, hidden or occluded. The visible-window idle rate on a GPU was not measured (it would require driving the user's desktop).
 
