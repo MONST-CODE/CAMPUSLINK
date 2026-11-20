@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.0 — Wi-Fi connection assistant
+
+- Home starts with Wi-Fi discovery and gives a choice of two independent connection modes without a lab scope.
+- Normal mode uses the Windows profile and leaves BSSID selection to Windows. Direct assisted mode tries the selected BSSID and at most one compatible alternative, preferring an idle independent physical adapter when available.
+- Verify the observed association and usable IPv4 gateway, display per-adapter Windows Internet evidence separately, and preserve local-only links for captive portal sign-in.
+- Confirm disruptive actions, bound attempts, and report verified recovery or recovery failure. The authorized CLP1 lab and offline simulator remain separate.
+
 ## 0.3.0 — Bilingual desktop workspace
 
 - French-first runtime localization, with an instant FR/EN switch and a checked catalog.

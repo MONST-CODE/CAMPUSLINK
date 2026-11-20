@@ -99,7 +99,7 @@ jobs:
             Campus Link/logs/build/
   prepare-release:
     # Only an explicit release-marker commit from this product branch may write a draft.
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/arena/b2cfefe0-campuslink' && contains(github.event.head_commit.message, '[prepare-release]') }}
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/arena/3fcc3119-campuslink' && contains(github.event.head_commit.message, '[prepare-release]') }}
     needs: native
     runs-on: windows-2022
     permissions:

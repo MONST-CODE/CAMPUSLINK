@@ -1,0 +1,96 @@
+[
+  {
+    "conclusion": "success",
+    "id": 136092567626,
+    "name": "native",
+    "steps": [
+      {
+        "conclusion": "success",
+        "name": "Set up job"
+      },
+      {
+        "conclusion": "success",
+        "name": "Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "name": "Install hash-verified SDL3, ImGui and LLVM"
+      },
+      {
+        "conclusion": "success",
+        "name": "Validate environment"
+      },
+      {
+        "conclusion": "success",
+        "name": "Validate ASCII fallback and UTF-8 build logs"
+      },
+      {
+        "conclusion": "success",
+        "name": "Verify invalid command exit code"
+      },
+      {
+        "conclusion": "success",
+        "name": "Verify the bilingual catalog"
+      },
+      {
+        "conclusion": "success",
+        "name": "CLP1 loopback protocol test"
+      },
+      {
+        "conclusion": "success",
+        "name": "Package command"
+      },
+      {
+        "conclusion": "success",
+        "name": "Build Debug and Release, run tests and verify local release"
+      },
+      {
+        "conclusion": "success",
+        "name": "Exercise the native Winsock CLP1 client (fixed loopback)"
+      },
+      {
+        "conclusion": "success",
+        "name": "Verify clean preserves the package and evidence"
+      },
+      {
+        "conclusion": "success",
+        "name": "Expose build evidence on the check run"
+      },
+      {
+        "conclusion": "success",
+        "name": "Retain artifacts and evidence"
+      },
+      {
+        "conclusion": "success",
+        "name": "Post Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "name": "Complete job"
+      }
+    ]
+  },
+  {
+    "conclusion": "success",
+    "id": 136093406044,
+    "name": "prepare-release",
+    "steps": [
+      {
+        "conclusion": "success",
+        "name": "Set up job"
+      },
+      {
+        "conclusion": "success",
+        "name": "Run actions/download-artifact@v4"
+      },
+      {
+        "conclusion": "success",
+        "name": "Attach the verified ZIP and proofs to a new draft release"
+      },
+      {
+        "conclusion": "success",
+        "name": "Complete job"
+      }
+    ]
+  }
+]

@@ -8,6 +8,7 @@
 #include <wlanapi.h>
 #include <setupapi.h>
 #include <objbase.h>
+#include <netlistmgr.h>
 
 #include "campuslink/network.hpp"
 #include "campuslink/dns.hpp"
@@ -188,6 +189,7 @@ Snapshot snapshot(std::stop_token stop, bool details = true) {
             match->id = std::move(id); match->description = utf8(info.strInterfaceDescription); match->kind = "Unknown";
         }
         match->wireless = true;
+        match->wlan_idle = info.isState == wlan_interface_state_disconnected;
         if (details) {
             WLAN_INTERFACE_CAPABILITY* raw{};
             const auto code = WlanGetInterfaceCapability(wlan.value, &info.InterfaceGuid, nullptr, &raw);
@@ -407,6 +409,7 @@ public:
                     (e.usCapabilityInformation & 0x10) ? "Privacy bit set (suite unverified)" : "No privacy bit", {},
                     static_cast<int>(e.lRssi), static_cast<unsigned>(e.ulChCenterFrequency / 1000), 0};
                 b.channel = channel(b.mhz);
+                b.infrastructure = e.dot11BssType == dot11_BSS_type_infrastructure;
                 if (profiles) for (DWORD k = 0; k < profiles->dwNumberOfItems; ++k) {
                     const auto& p = profiles->Network[k];
                     if (p.dot11BssType == e.dot11BssType && label(p.dot11Ssid) == b.ssid && p.strProfileName[0] &&
@@ -419,7 +422,40 @@ public:
         }
         return out;
     }
-    std::optional<Error> connect(const Bss& b, std::stop_token stop) override {
+    Reachability reachability(const Interface& adapter) override {
+        const auto initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        if (FAILED(initialized) && initialized != RPC_E_CHANGED_MODE) return Reachability::unknown;
+        struct Apartment { HRESULT status; ~Apartment() { if (SUCCEEDED(status)) CoUninitialize(); } } apartment{initialized};
+        const auto release = [](auto* object) { if (object) object->Release(); };
+        // CLSID_NetworkListManager and IID_INetworkListManager from netlistmgr.idl.
+        // Use typed GUID values rather than the compiler extension __uuidof.
+        constexpr GUID clsid{0xdcb00c01, 0x570f, 0x4a9b, {0x8d, 0x69, 0x19, 0x9f, 0xdb, 0xa5, 0x72, 0x3b}};
+        constexpr GUID iid{0xdcb00000, 0x570f, 0x4a9b, {0x8d, 0x69, 0x19, 0x9f, 0xdb, 0xa5, 0x72, 0x3b}};
+        void* raw_manager{};
+        if (FAILED(CoCreateInstance(clsid, nullptr, CLSCTX_ALL, iid, &raw_manager)) || !raw_manager) return Reachability::unknown;
+        const std::unique_ptr<INetworkListManager, decltype(release)> manager(static_cast<INetworkListManager*>(raw_manager), release);
+        IEnumNetworkConnections* raw_list{};
+        if (FAILED(manager->GetNetworkConnections(&raw_list)) || !raw_list) return Reachability::unknown;
+        const std::unique_ptr<IEnumNetworkConnections, decltype(release)> links(raw_list, release);
+        Reachability evidence{Reachability::unknown};
+        for (unsigned n = 0; n < 128; ++n) {
+            INetworkConnection* raw_connection{};
+            ULONG written{};
+            if (links->Next(1, &raw_connection, &written) != S_OK || !written || !raw_connection) break;
+            const std::unique_ptr<INetworkConnection, decltype(release)> connection(raw_connection, release);
+            GUID id{};
+            NLM_CONNECTIVITY classification{};
+            if (FAILED(connection->GetAdapterId(&id)) || !equal_id(guid_text(id), adapter.id) ||
+                FAILED(connection->GetConnectivity(&classification))) continue;
+            if (classification & (NLM_CONNECTIVITY_IPV4_INTERNET | NLM_CONNECTIVITY_IPV6_INTERNET)) return Reachability::internet;
+            if (classification != NLM_CONNECTIVITY_DISCONNECTED) evidence = Reachability::local_only;
+        }
+        return evidence;
+    }
+    std::optional<Error> connect(const Bss& b, std::stop_token stop) override { return join(b, true, stop); }
+    std::optional<Error> connect_profile(const Bss& b, std::stop_token stop) override { return join(b, false, stop); }
+private:
+    std::optional<Error> join(const Bss& b, bool exact, std::stop_token stop) {
         if (stop.stop_requested()) return Error{"WlanConnect", ERROR_CANCELLED, "Cancelled before connection"};
         Wlan wlan;
         std::vector<Error> errors;
@@ -433,14 +469,14 @@ public:
             DOT11_BSSID_LIST desired{};
             desired.Header = {NDIS_OBJECT_TYPE_DEFAULT, DOT11_BSSID_LIST_REVISION_1, sizeof desired};
             desired.uNumOfEntries = desired.uTotalNumOfEntries = 1;
-            if (b.bssid.size() != 17) return fail("BSSID selection", ERROR_INVALID_DATA);
-            for (unsigned k = 0; k < 6; ++k) {
+            if (exact && b.bssid.size() != 17) return fail("BSSID selection", ERROR_INVALID_DATA);
+            for (unsigned k = 0; exact && k < 6; ++k) {
                 const auto* start = b.bssid.data() + k * 3;
                 unsigned value{}; const auto parsed = std::from_chars(start, start + 2, value, 16);
                 if (parsed.ec != std::errc{} || parsed.ptr != start + 2 || (k < 5 && start[2] != ':')) return fail("BSSID selection", ERROR_INVALID_DATA);
                 desired.BSSIDs[0][k] = static_cast<UCHAR>(value);
             }
-            WLAN_CONNECTION_PARAMETERS params{wlan_connection_mode_profile, profile, nullptr, &desired, dot11_BSS_type_infrastructure, 0};
+            WLAN_CONNECTION_PARAMETERS params{wlan_connection_mode_profile, profile, nullptr, exact ? &desired : nullptr, dot11_BSS_type_infrastructure, 0};
             const auto code = WlanConnect(wlan.value, &info.InterfaceGuid, &params, nullptr);
             if (code) return fail("WlanConnect", code);
             const auto end = Clock::now() + 15s;
@@ -449,7 +485,7 @@ public:
             while (Clock::now() < end && !stop.stop_requested()) {
                 const auto current = snapshot(stop, false);
                 const auto match = std::find_if(current.interfaces.begin(), current.interfaces.end(), [&](const auto& item) {
-                    return equal_id(item.id, b.interface_id) && item.associated && item.profile == b.profile && item.bssid == b.bssid;
+                    return equal_id(item.id, b.interface_id) && item.associated && item.profile == b.profile && (exact ? item.bssid == b.bssid : item.ssid == b.ssid);
                 });
                 if (match != current.interfaces.end()) {
                     saw_association = true;
@@ -460,19 +496,31 @@ public:
                 } else { last_ip.clear(); last_gateway.clear(); }
                 if (!settle(300ms, stop)) break;
             }
-            if (stop.stop_requested()) {
-                // Cancel the host-owned request when possible; never deauthenticate other stations.
-                WlanDisconnect(wlan.value, &info.InterfaceGuid, nullptr);
-                return fail("WlanConnect cancelled", ERROR_CANCELLED);
+            // The API cancels at adapter level, not by request ID. Don't tear down a
+            // different association that Windows or the user may already have restored.
+            const auto latest = snapshot({}, false);
+            const auto live = std::find_if(latest.interfaces.begin(), latest.interfaces.end(), [&](const auto& item) {
+                return equal_id(item.id, b.interface_id);
+            });
+            const bool another_link = live != latest.interfaces.end() && live->associated &&
+                (live->profile != b.profile || live->ssid != b.ssid || (exact && live->bssid != b.bssid));
+            const bool idle = live != latest.interfaces.end() && live->wlan_idle;
+            if (!another_link && !idle) {
+                const auto disconnect = WlanDisconnect(wlan.value, &info.InterfaceGuid, nullptr);
+                if (disconnect != ERROR_SUCCESS) {
+                    auto e = fail("WlanDisconnect", disconnect);
+                    e.request_unsettled = true;
+                    return e;
+                }
             }
-            // Stop a still pending host connection before allowing a subsequent authorized candidate.
-            WlanDisconnect(wlan.value, &info.InterfaceGuid, nullptr);
+            if (stop.stop_requested()) return fail("WlanConnect cancelled", ERROR_CANCELLED);
             return Error{"WlanConnect", ERROR_TIMEOUT, saw_association ?
                 "Association observed but Windows did not stabilize usable IPv4 and gateway within 15 s" :
-                "Windows did not confirm requested profile/BSSID within 15 s"};
+                exact ? "Windows did not confirm requested profile/BSSID within 15 s" : "Windows did not confirm requested profile/SSID within 15 s"};
         }
         return fail("WlanConnect interface", ERROR_NOT_FOUND);
     }
+public:
     Observation measure(const Interface& i, const Scope& scope, std::stop_token stop) override {
         Observation o;
         if (!scope.valid() || !i.index || i.profile != scope.profile || i.bssid != scope.bssid) {

@@ -7,6 +7,7 @@ struct Unavailable final : Backend {
     Snapshot inspect(std::stop_token) override { return {{}, {status()}}; }
     Discovery scan(std::stop_token) override { return {{}, {status()}}; }
     std::optional<Error> connect(const Bss&, std::stop_token) override { return status(); }
+    std::optional<Error> connect_profile(const Bss&, std::stop_token) override { return status(); }
     Observation measure(const Interface&, const Scope&, std::stop_token) override { Observation o; o.error = status(); return o; }
 };
 }

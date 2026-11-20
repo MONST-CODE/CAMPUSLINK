@@ -2,6 +2,7 @@
 #include "campuslink/dns.hpp"
 #include <algorithm>
 #include <charconv>
+#include <tuple>
 #include <stdexcept>
 
 namespace campuslink::net {
@@ -226,4 +227,95 @@ Handoff select(Backend& backend, const Scope& scope, const Bss& candidate, std::
     }
     return {cancelled ? "CANCELLED" : "VALIDATION_FAILED", false, std::move(failure), std::move(measured)};
 }
+namespace {
+bool same_bss(const Bss& a, const Bss& b) {
+    return a.interface_id == b.interface_id && a.bssid == b.bssid && a.ssid == b.ssid && a.profile == b.profile &&
+        a.security == b.security && a.infrastructure && b.infrastructure;
+}
+bool usable_link(const Interface& i) {
+    return i.wireless && i.up && i.associated && usable_ipv4(i.address) && usable_ipv4(i.gateway);
+}
+bool matches_wifi(const Interface& i, const Bss& b, bool exact) {
+    return i.associated && i.profile == b.profile && i.ssid == b.ssid && (!exact || i.bssid == b.bssid);
+}
+}
+std::vector<Bss> wifi_plan(const Bss& selected, const Discovery& scan, const Snapshot& topology, WifiMode mode) {
+    if (selected.profile.empty() || selected.ssid.empty() || !bssid_format(selected.bssid) ||
+        !std::any_of(scan.bss.begin(), scan.bss.end(), [&](const auto& b) { return same_bss(selected, b); })) return {};
+    const auto* primary = find(topology, selected.interface_id);
+    if (!primary || !primary->wireless) return {};
+    if (mode == WifiMode::normal) return {selected};
+    std::vector<Bss> idle, primary_alternatives;
+    for (const auto& b : scan.bss) {
+        if (b.profile != selected.profile || b.ssid != selected.ssid || b.security != selected.security || !b.infrastructure ||
+            !bssid_format(b.bssid) || same_bss(b, selected)) continue;
+        const auto* adapter = find(topology, b.interface_id);
+        if (!adapter || !adapter->wireless) continue;
+        if (adapter->id == primary->id) primary_alternatives.push_back(b);
+        else if (adapter->hardware_interface && primary->hardware_interface && adapter->wlan_idle && !adapter->associated && !adapter->device_instance.empty() &&
+                 !primary->device_instance.empty() && adapter->device_instance != primary->device_instance) idle.push_back(b);
+    }
+    const auto preferred = [](const Bss& a, const Bss& b) {
+        if (a.rssi != b.rssi) return a.rssi > b.rssi;
+        return std::tie(a.interface_id, a.bssid) < std::tie(b.interface_id, b.bssid);
+    };
+    std::sort(idle.begin(), idle.end(), preferred);
+    std::sort(primary_alternatives.begin(), primary_alternatives.end(), preferred);
+    if (!idle.empty()) return {selected, idle.front()};
+    if (!primary_alternatives.empty()) return {selected, primary_alternatives.front()};
+    return {selected};
+}
+WifiResult connect_wifi(Backend& backend, const Bss& selected, const Discovery& scan, WifiMode mode, std::stop_token stop) {
+    WifiResult result;
+    if (stop.stop_requested()) { result.status = WifiStatus::cancelled; return result; }
+    const auto topology = backend.inspect(stop);
+    const auto plan = wifi_plan(selected, scan, topology, mode);
+    if (stop.stop_requested()) { result.status = WifiStatus::cancelled; return result; }
+    if (plan.empty()) return result;
+    const bool exact = mode == WifiMode::assisted;
+    for (const auto& trial : plan) {
+        const auto before = backend.inspect(stop);
+        const auto* previous = find(before, trial.interface_id);
+        if (stop.stop_requested()) { result.status = WifiStatus::cancelled; return result; }
+        if (!previous || !previous->wireless) continue;
+        if (trial.interface_id != selected.interface_id) {
+            const auto* primary = find(before, selected.interface_id);
+            if (previous->associated || !previous->wlan_idle || !primary || !primary->hardware_interface || !previous->hardware_interface ||
+                previous->device_instance.empty() || primary->device_instance.empty() || previous->device_instance == primary->device_instance) continue;
+        }
+        const bool mutation = !(usable_link(*previous) && matches_wifi(*previous, trial, exact));
+        auto failure = mutation ? (exact ? backend.connect(trial, stop) : backend.connect_profile(trial, stop)) : std::nullopt;
+        const auto after = backend.inspect(stop);
+        const auto* linked = find(after, trial.interface_id);
+        if (!failure && !stop.stop_requested() && linked && usable_link(*linked) && matches_wifi(*linked, trial, exact)) {
+            result.evidence = backend.reachability(*linked);
+            result.attempts.push_back({trial, {}});
+            result.link = *linked;
+            result.status = result.evidence == Reachability::internet ? WifiStatus::internet_reported : WifiStatus::local_link;
+            return result; // Keep even a local-only link for Windows/portal sign-in. Never try other credentials.
+        }
+        if (!failure && !stop.stop_requested()) failure = Error{"validation", 0, "Expected Wi-Fi link and usable IPv4 gateway not confirmed"};
+        const bool unsettled = failure && failure->request_unsettled;
+        result.attempts.push_back({trial, std::move(failure)});
+        if (unsettled) { result.status = WifiStatus::request_unsettled; return result; }
+        if (mutation && usable_link(*previous) && bssid_format(previous->bssid) && !previous->profile.empty()) {
+            const Bss restore{previous->id, previous->ssid, previous->bssid, {}, previous->profile};
+            auto recovery = backend.inspect({});
+            const auto recovered = [&] {
+                const auto* old = find(recovery, previous->id);
+                return old && usable_link(*old) && matches_wifi(*old, restore, true);
+            };
+            if (!recovered()) {
+                const auto error = backend.connect(restore, {});
+                recovery = backend.inspect({});
+                if (error || !recovered()) { result.status = WifiStatus::recovery_failed; return result; }
+            }
+            result.restored = true;
+        }
+        if (stop.stop_requested()) { result.status = WifiStatus::cancelled; return result; }
+    }
+    result.status = WifiStatus::failed;
+    return result;
+}
+
 }

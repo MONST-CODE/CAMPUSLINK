@@ -10,7 +10,7 @@
 
 namespace campuslink::net {
 using Clock = std::chrono::steady_clock;
-struct Error { std::string operation; unsigned code{}; std::string detail; };
+struct Error { std::string operation; unsigned code{}; std::string detail; bool request_unsettled{}; };
 struct Interface {
     std::string id, name, description, kind, hardware_id, manufacturer, driver, provider, driver_date;
     std::string address, gateway, dns;
@@ -21,7 +21,7 @@ struct Interface {
     unsigned secondary_sta_bytes{};
     std::optional<unsigned> desired_bssids;
     std::optional<bool> mfp_capable, dot11d_capable, hosted_network_capable;
-    bool hardware_interface{}, secondary_sta_reported{};
+    bool hardware_interface{}, secondary_sta_reported{}, wlan_idle{};
     unsigned index{};
     bool wireless{}, up{}, associated{}, dhcp{};
     double rx_mbps{}, tx_mbps{};
@@ -31,6 +31,7 @@ struct Bss {
     std::string interface_id, ssid, bssid, security, profile;
     int rssi{};
     unsigned mhz{}, channel{};
+    bool infrastructure{true};
 };
 struct Snapshot { std::vector<Interface> interfaces; std::vector<Error> errors; };
 struct Discovery { std::vector<Bss> bss; std::vector<Error> errors; };
@@ -94,15 +95,32 @@ std::vector<std::vector<std::size_t>> experiment_waves(const std::vector<Experim
 bool usable_ipv4(std::string_view);
 struct Diagnostic { std::string step, status, detail; };
 std::vector<Diagnostic> diagnose(const Interface*, bool detected, const Observation*);
+// Windows-reported evidence for one adapter. It is not an active Internet test.
+enum class Reachability { unknown, local_only, internet };
 struct Backend {
     virtual ~Backend() = default;
     virtual Snapshot inspect(std::stop_token) = 0;
     virtual Discovery scan(std::stop_token) = 0;
     virtual std::optional<Error> connect(const Bss&, std::stop_token) = 0;
+    virtual std::optional<Error> connect_profile(const Bss&, std::stop_token) = 0;
+    virtual Reachability reachability(const Interface&) { return Reachability::unknown; }
     virtual Observation measure(const Interface&, const Scope&, std::stop_token) = 0;
 };
 struct Handoff { std::string state; bool rolled_back{}; std::optional<Error> error; std::optional<Candidate> measured; };
 Handoff select(Backend&, const Scope&, const Bss&, std::stop_token);
+enum class WifiMode { normal, assisted };
+enum class WifiStatus { invalid, cancelled, failed, recovery_failed, request_unsettled, local_link, internet_reported };
+struct WifiAttempt { Bss candidate; std::optional<Error> error; };
+struct WifiResult {
+    WifiStatus status{WifiStatus::invalid};
+    std::optional<Interface> link;
+    std::vector<WifiAttempt> attempts;
+    Reachability evidence{Reachability::unknown};
+    bool restored{};
+};
+// Read-only, bounded plan from one scan. No simulated clients or active benchmarks.
+std::vector<Bss> wifi_plan(const Bss& selected, const Discovery&, const Snapshot&, WifiMode);
+WifiResult connect_wifi(Backend&, const Bss& selected, const Discovery&, WifiMode, std::stop_token);
 Backend& platform();
 std::optional<Error> loopback_protocol(unsigned port);
 }
