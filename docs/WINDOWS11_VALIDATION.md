@@ -42,7 +42,7 @@ Record model, driver, Windows build and the observed per-adapter result, omittin
 
 ## 0.4.2 additions
 
-Run as a standard user on the Dell/AX201 (or another named adapter). Record Windows build, driver version and, for each row, the result shown by CAMPUSLINK next to `netsh wlan show interfaces` and `ipconfig`. Never record passwords. Rows not run stay `NOT_TESTED_ON_HARDWARE`.
+Run as a standard user on the Dell/AX201 (or another named adapter). Record Windows build, driver version and, for each row, the result shown by CAMPUSLINK next to `netsh wlan show interfaces` and `ipconfig`. Never record passwords. Rows not run stay `NOT_TESTED_ON_HARDWARE`. Executed so far (2026-11-20): rows 1 (campus, recent-list fallback), 2 (normal and assisted) and a variant of 7 (out-of-range saved network, previous link restored) — see [FIELD_0.4.2](reports/FIELD_0.4.2.md).
 
 | # | Scenario | Expected behaviour |
 |---|---|---|
