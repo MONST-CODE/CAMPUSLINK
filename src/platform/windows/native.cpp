@@ -427,9 +427,13 @@ public:
         if (FAILED(initialized) && initialized != RPC_E_CHANGED_MODE) return Reachability::unknown;
         struct Apartment { HRESULT status; ~Apartment() { if (SUCCEEDED(status)) CoUninitialize(); } } apartment{initialized};
         const auto release = [](auto* object) { if (object) object->Release(); };
-        INetworkListManager* raw_manager{};
-        if (FAILED(CoCreateInstance(__uuidof(NetworkListManager), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&raw_manager)))) return Reachability::unknown;
-        const std::unique_ptr<INetworkListManager, decltype(release)> manager(raw_manager, release);
+        // CLSID_NetworkListManager and IID_INetworkListManager from netlistmgr.idl.
+        // Use typed GUID values rather than the compiler extension __uuidof.
+        constexpr GUID clsid{0xdcb00c01, 0x570f, 0x4a9b, {0x8d, 0x69, 0x19, 0x9f, 0xdb, 0xa5, 0x72, 0x3b}};
+        constexpr GUID iid{0xdcb00000, 0x570f, 0x4a9b, {0x8d, 0x69, 0x19, 0x9f, 0xdb, 0xa5, 0x72, 0x3b}};
+        void* raw_manager{};
+        if (FAILED(CoCreateInstance(clsid, nullptr, CLSCTX_ALL, iid, &raw_manager)) || !raw_manager) return Reachability::unknown;
+        const std::unique_ptr<INetworkListManager, decltype(release)> manager(static_cast<INetworkListManager*>(raw_manager), release);
         IEnumNetworkConnections* raw_list{};
         if (FAILED(manager->GetNetworkConnections(&raw_list)) || !raw_list) return Reachability::unknown;
         const std::unique_ptr<IEnumNetworkConnections, decltype(release)> links(raw_list, release);
