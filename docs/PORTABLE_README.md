@@ -1,9 +1,9 @@
-# CAMPUSLINK portable — Windows x64
+# CAMPUSLINK portable — Windows 11 x64
 
-Extract the full archive to a folder you can write to. Run `CampusLink.exe` next to `SDL3.dll` on Windows 11 x64. No administrator account is required for the offline lab. A Vulkan driver is optional: the application falls back to SDL software rendering when Vulkan cannot start.
+**FR.** Extrayez tout le ZIP, puis lancez `CampusLink.exe` à côté de `SDL3.dll`. À l’accueil, sélectionnez **Me connecter à un réseau**, choisissez un point d’accès, puis **Connexion normale** ou **Connexion assistée directe**. Aucun essai normal préalable n’est requis pour l’assistance. Si le profil manque ou qu’un portail demande une identification, utilisez Windows, puis actualisez les résultats dans CAMPUSLINK.
 
-1. Open **Virtual Client Lab** to run a deterministic offline scenario. All client metrics there are simulated.
-2. Use **Hardware Lab** to inspect driver-reported information and **Network Discovery** to request a WLAN scan. Windows location policy can limit the result.
-3. To run a real experiment, read [USER_GUIDE.md](USER_GUIDE.md) and prepare your own authorized `test_scope.conf` from `config/test_scope.example.conf`. No experiment is active by default. See [network diagnostics](NETWORK_DIAGNOSTICS.md) and [Windows 11 verification](WINDOWS11_VALIDATION.md).
+**EN.** Extract the entire ZIP and run `CampusLink.exe` next to `SDL3.dll`. From Home choose **Connect to Wi-Fi**, select an access point, and choose **Connect normally** or **Connect with assistance**. You can start assistance directly. Use Windows for a missing profile or captive portal sign-in, then refresh CAMPUSLINK's results.
 
-[Build information](BUILD_INFO.json) · [Runtime imports](RUNTIME_IMPORTS.txt) · [Release notes](RELEASE_NOTES.md) · [Third-party notices](THIRD_PARTY_NOTICES.md)
+No driver installation or app elevation is required for the base workflow when Windows grants Wi-Fi access. Vulkan is preferred; SDL software rendering is the fallback. The Virtual Client Lab and scheduler experiments are offline; neither represents radio stations or real aggregation. Active CLP1 tests require the separately authorized scope described in the guide. No automatic test runs on startup.
+
+[User guide](USER_GUIDE.md) · [Diagnostics](NETWORK_DIAGNOSTICS.md) · [Windows 11 acceptance](WINDOWS11_VALIDATION.md) · [Build information](BUILD_INFO.json) · [Release notes](RELEASE_NOTES.md) · [Third-party notices](THIRD_PARTY_NOTICES.md)

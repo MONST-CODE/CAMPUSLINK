@@ -23,7 +23,7 @@ expect_exit() {
     if [[ $rc != "$want" ]]; then printf 'FAIL: expected exit %d, got %d\n' "$want" "$rc" >&2; return 1; fi
 }
 cd "$root"
-core=(src/simulation/lab.cpp src/network/diagnostics.cpp src/network/dns.cpp src/performance/score.cpp)
+core=(src/simulation/lab.cpp src/network/diagnostics.cpp src/network/dns.cpp src/performance/score.cpp src/performance/path_lab.cpp)
 vendor=(imgui.cpp imgui_draw.cpp imgui_tables.cpp imgui_widgets.cpp backends/imgui_impl_sdl3.cpp backends/imgui_impl_sdlgpu3.cpp backends/imgui_impl_sdlrenderer3.cpp)
 for config in debug release; do
     flags=(-O0 -g)
@@ -36,7 +36,7 @@ for config in debug release; do
         "${CXX:-g++}" "${common[@]}" -Wall -Wextra -Wpedantic -Werror -c "$source" -o "$obj"
         objs+=("$obj")
     done
-    "${CXX:-g++}" -pthread "${objs[@]:0:4}" "${objs[-1]}" -o "$work/core-tests"
+    "${CXX:-g++}" -pthread "${objs[@]:0:${#core[@]}}" "${objs[-1]}" -o "$work/core-tests"
     expect_exit 0 "$work/core-tests"
     unset 'objs[-1]'
     for source in "${vendor[@]}"; do

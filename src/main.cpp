@@ -149,7 +149,7 @@ int main(int argc, char* argv[]) {
     if (self_test && result == 0) {
         std::printf("PASS: SDL %d runtime, dummy window and quit event\n", SDL_GetVersion());
     }
-    if (ui_test && result == 0) std::puts("PASS: SDL dummy + ImGui software rendering, 12 panels in four language/theme combinations and quit event");
-    if (graphics && result == 0) std::puts("PASS: native SDL Vulkan, 12 panels in four language/theme combinations and quit event");
+    if (ui_test && result == 0) std::puts("PASS: SDL dummy + ImGui software rendering, 13 panels in four language/theme combinations and quit event");
+    if (graphics && result == 0) std::puts("PASS: native SDL Vulkan, 13 panels in four language/theme combinations and quit event");
     return result;
 }

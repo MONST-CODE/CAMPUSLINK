@@ -267,7 +267,7 @@ try {
                 if ((Get-FileHash -LiteralPath (Join-Path $fontRoot $item.file) -Algorithm SHA256).Hash.ToLowerInvariant() -cne $item.sha) { throw "Font integrity mismatch: $($item.file)" }
             }
         }
-        $core = @('src\simulation\lab.cpp','src\network\diagnostics.cpp','src\network\dns.cpp','src\performance\score.cpp')
+        $core = @('src\simulation\lab.cpp','src\network\diagnostics.cpp','src\network\dns.cpp','src\performance\score.cpp','src\performance\path_lab.cpp')
         $app = @('src\main.cpp','src\ui\desktop.cpp','src\platform\windows\native.cpp')
         $builds = @{}
         $objRoot = Join-Path $build 'obj'
