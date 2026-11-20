@@ -23,4 +23,4 @@ Start with **Virtual Client Lab** for deterministic offline scenarios. **Hardwar
 
 ### Candidate 0.2.0
 
-The portable package targets Windows 11 x64. The integrated Lab runs offline; its client count and RSS measurements describe simulation only. Physical trials require exact profile/BSSID and an authorized endpoint. See [Windows 11 acceptance](docs/WINDOWS11_VALIDATION.md) for client, Dell/AX201, Vulkan and WLAN field checks; Windows Server CI does not replace those checks.
+The portable package targets Windows 11 x64. Start with **Me connecter à un réseau** and choose a normal Windows connection or direct assisted connection, independently of the lab. See the [user guide](docs/USER_GUIDE.md). The integrated Lab runs offline; its client count and RSS measurements describe simulation only. Physical trials require exact profile/BSSID and an authorized endpoint. See [Windows 11 acceptance](docs/WINDOWS11_VALIDATION.md) for client, Dell/AX201, Vulkan and WLAN field checks; Windows Server CI does not replace those checks.

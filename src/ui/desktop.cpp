@@ -41,6 +41,7 @@ struct View {
     std::string status{english(Key::Ready)};
     net::Snapshot hardware;
     net::Discovery discovery;
+    std::optional<net::WifiResult> wifi;
     std::vector<net::Scope> scopes;
     struct Outcome { std::string bssid, status, detail; };
     std::vector<Outcome> outcomes;
@@ -58,6 +59,7 @@ class Worker {
     View view_;
     std::atomic_bool busy_{false}, paused_{false};
     net::Clock::time_point last_physical_{net::Clock::now() - 1h};
+    net::Clock::time_point last_wifi_{net::Clock::now() - 1min};
     net::Clock::time_point last_scan_{net::Clock::now() - 1min};
     fs::path folder_;
     std::jthread thread_; // destroyed first; callbacks cannot outlive their state
@@ -131,9 +133,31 @@ public:
         run(english(Key::WindowsWlanDiscovery), [this](auto stop) {
             if (net::Clock::now() - last_scan_ < 10s) throw std::runtime_error(english(Key::DiscoveryCooldown10Seconds));
             last_scan_ = net::Clock::now();
+            auto hardware = net::platform().inspect(stop);
             auto data = net::platform().scan(stop);
             for (const auto& e : data.errors) log("WARN", "discovery", e.operation, e.code);
-            update([&](View& v) { v.discovery = std::move(data); v.scan_at = net::Clock::now(); v.status = english(Key::DiscoveryCompletedReviewNativeStatus); });
+            update([&](View& v) {
+                v.hardware = std::move(hardware); v.discovery = std::move(data);
+                v.scan_at = stop.stop_requested() ? net::Clock::time_point{} : net::Clock::now();
+                v.status = english(Key::DiscoveryCompletedReviewNativeStatus);
+            });
+        });
+    }
+    void wifi(net::Bss selected, net::WifiMode mode) {
+        run(english(mode == net::WifiMode::normal ? Key::WifiNormal : Key::WifiAssist), [this, selected = std::move(selected), mode](auto stop) {
+            const auto now = net::Clock::now();
+            if (now - last_wifi_ < 15s) throw std::runtime_error(english(Key::WifiCooldown));
+            const auto saved = copy();
+            if (saved.scan_at == net::Clock::time_point{} || now - saved.scan_at >= 2min)
+                throw std::runtime_error(english(Key::WifiCannotStart));
+            last_wifi_ = now;
+            auto result = net::connect_wifi(net::platform(), selected, saved.discovery, mode, stop);
+            for (const auto& attempt : result.attempts) if (attempt.error) log("WARN", "handoff", attempt.error->operation, attempt.error->code);
+            auto hardware = net::platform().inspect({});
+            update([&](View& v) {
+                v.wifi = std::move(result); v.hardware = std::move(hardware);
+                v.status = english(Key::WifiResults);
+            });
         });
     }
     void load_scope() {
@@ -393,6 +417,9 @@ struct Screen {
     bool unreadable_preferences{}, unsaved_preferences{}, reset_display{};
     std::vector<net::Experiment> confirmation;
     bool confirmation_queue{};
+    bool wifi_settings_failed{};
+    std::optional<net::Bss> wifi_confirmation;
+    net::WifiMode wifi_mode{net::WifiMode::normal};
     unsigned logical_selected{}, logical_page{1};
     std::vector<net::Bss> batch;
     int measurement_offset{};
@@ -408,6 +435,41 @@ struct Screen {
         confirmation = std::move(experiments);
         ImGui::OpenPopup("###physical_confirmation");
         consent = false;
+    }
+    void open_windows_wifi() {
+#ifdef _WIN32
+        wifi_settings_failed = !SDL_OpenURL("ms-settings:network-wifi");
+#endif
+    }
+    void wifi_result(const net::WifiResult& result) {
+        ImGui::SeparatorText(tr(Key::WifiResults));
+        Key label{Key::WifiCannotStart};
+        switch (result.status) {
+        case net::WifiStatus::invalid: break;
+        case net::WifiStatus::cancelled: label = Key::WifiCancel; break;
+        case net::WifiStatus::failed: label = Key::WifiFailed; break;
+        case net::WifiStatus::recovery_failed: label = Key::WifiRecovery; break;
+        case net::WifiStatus::request_unsettled: label = Key::WifiUnsettled; break;
+        case net::WifiStatus::local_link: label = Key::WifiLocal; break;
+        case net::WifiStatus::internet_reported: label = Key::WifiInternet; break;
+        }
+        paragraph(tr(label));
+        if (result.link) {
+            field(tr(Key::ActiveWirelessInterface), result.link->description.empty() ? result.link->name : result.link->description);
+            field(tr(Key::AssociatedSsid), result.link->ssid);
+            field(tr(Key::Bssid), result.link->bssid);
+            field(tr(Key::Ipv4), result.link->address);
+            field(tr(Key::Gateway), result.link->gateway);
+            metric(tr(Key::Rssi), result.link->rssi ? std::optional<double>(*result.link->rssi) : std::nullopt, tr(Key::Dbm));
+            if (result.link->rx_mbps > 0 && result.link->tx_mbps > 0)
+                ImGui::Text(tr(Key::LinkRatesReportedRx1f), result.link->rx_mbps, result.link->tx_mbps);
+            if (result.status == net::WifiStatus::local_link) paragraph(tr(Key::WifiPortalHelp));
+        }
+        if (result.restored) paragraph(tr(Key::WifiRestored));
+        for (const auto& attempt : result.attempts) if (attempt.error) {
+            field(tr(Key::SelectedBssid), attempt.candidate.bssid);
+            errors({*attempt.error});
+        }
     }
     void about() {
         paragraph(tr(Key::AboutIntro));
@@ -509,14 +571,22 @@ struct Screen {
         ImGui::Separator(); ImGui::Spacing();
         switch (page) {
         case 0:
-            metric_cards(static_cast<unsigned>(view.hardware.interfaces.size()), static_cast<unsigned>(view.discovery.bss.size()), view.events);
+            paragraph(tr(Key::WifiIntro));
+            ImGui::BeginDisabled(worker.busy());
+            if (ImGui::Button(tr(Key::WifiStart), {0, ImGui::GetFrameHeight() + 8 * dpi})) {
+                page = 4; selected_bss = -1; consent = false; batch.clear();
+                if (!fresh_scan) worker.scan();
+            }
+            ImGui::EndDisabled();
+            if (view.wifi && ImGui::Button(tr(Key::WifiRecent))) page = 8;
+            ImGui::Spacing();
+            if (ImGui::CollapsingHeader(tr(Key::WifiLabSection)))
+                metric_cards(static_cast<unsigned>(view.hardware.interfaces.size()), static_cast<unsigned>(view.discovery.bss.size()), view.events);
             if (ImGui::Button(tr(Key::QuickStart))) page = 11;
             ImGui::Separator();
             field(tr(Key::Renderer), message(display.mode)); if (!display.warning.empty()) paragraph(message(display.warning));
             field(tr(Key::ActiveWirelessInterface), active ? active->description : "");
             field(tr(Key::AssociatedSsid), active ? active->ssid : "");
-            field(tr(Key::AuthorizedApplicationEndpoint), current && current->host_validated && current->observation.endpoint_verified ? tr(Key::Verified) : "");
-            metric(tr(Key::ConnectionScore), current && current->host_validated && current->rating.coverage ? std::optional<double>(current->rating.points) : std::nullopt, "/ 100");
 
             ImGui::BeginDisabled(worker.busy()); if (ImGui::Button(tr(Key::RefreshHardware))) worker.inspect(); ImGui::EndDisabled();
             if (view.hardware.interfaces.empty()) paragraph(tr(Key::WaitingForInventory));
@@ -621,12 +691,17 @@ struct Screen {
         }
         case 4:
             ImGui::BeginDisabled(worker.busy()); if (ImGui::Button(tr(Key::ScanWindowsWlan))) { selected_bss = -1; consent = false; batch.clear(); worker.scan(); } ImGui::EndDisabled();
-            paragraph(tr(Key::ExplicitScanNoConnectionIs));
+            paragraph(tr(Key::WifiGuidance));
+#ifdef _WIN32
+            if (ImGui::Button(tr(Key::WifiSettings))) open_windows_wifi();
+            if (wifi_settings_failed) paragraph(tr(Key::WifiSettingsFailed));
+#endif
+            if (!worker.busy() && view.discovery.bss.empty()) paragraph(tr(Key::WifiEmpty));
             if (!fresh_scan && !view.discovery.bss.empty()) ImGui::TextColored(palette(color_theme).caution, "%s", tr(Key::ScanExpiredRefreshBeforeConnecting));
             errors(view.discovery.errors);
             discovery_filter.Draw(tr(Key::FilterSsidBssidOrProfile));
-            if (ImGui::BeginTable("bss", 6, ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollX | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingFixedFit, {0, 295 * dpi})) {
-                for (const auto* h : {tr(Key::Ssid), tr(Key::Bssid), tr(Key::Signal), tr(Key::MhzChannel), tr(Key::SecurityEvidence), tr(Key::WindowsProfile)}) ImGui::TableSetupColumn(h);
+            if (ImGui::BeginTable("bss", 7, ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollX | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingFixedFit, {0, 295 * dpi})) {
+                for (const auto* h : {tr(Key::Ssid), tr(Key::Bssid), tr(Key::Signal), tr(Key::MhzChannel), tr(Key::SecurityEvidence), tr(Key::WindowsProfile), tr(Key::ActiveWirelessInterface)}) ImGui::TableSetupColumn(h);
                 ImGui::TableHeadersRow();
                 std::vector<int> indices;
                 for (unsigned j = 0; j < view.discovery.bss.size(); ++j) {
@@ -640,6 +715,9 @@ struct Screen {
                     if (ImGui::Selectable(b.ssid.empty() ? tr(Key::Hidden) : b.ssid.c_str(), selected_bss == j)) { selected_bss = j; consent = false; page = 8; }
                     ImGui::PopID(); ImGui::TableNextColumn(); text(b.bssid); ImGui::TableNextColumn(); ImGui::Text("%d dBm", b.rssi);
                     ImGui::TableNextColumn(); ImGui::Text("%u / %u", b.mhz, b.channel); ImGui::TableNextColumn(); text(message(b.security)); ImGui::TableNextColumn(); text(b.profile);
+                    ImGui::TableNextColumn();
+                    const auto adapter = std::find_if(view.hardware.interfaces.begin(), view.hardware.interfaces.end(), [&](const auto& i) { return i.id == b.interface_id; });
+                    text(adapter != view.hardware.interfaces.end() && !adapter->name.empty() ? adapter->name : b.interface_id);
                 }
                 ImGui::EndTable();
             } break;
@@ -701,6 +779,49 @@ struct Screen {
             break;
         }
         case 8: {
+            field(tr(Key::WifiNetwork), chosen ? chosen->ssid : "");
+            paragraph(tr(Key::WifiModesHelp));
+            paragraph(tr(Key::WifiScopeIndependent));
+            const bool valid_wifi = chosen && chosen->infrastructure && !chosen->profile.empty() && !chosen->ssid.empty();
+            const auto request_wifi = [&](net::WifiMode mode) {
+                wifi_mode = mode; wifi_confirmation = *chosen;
+                ImGui::OpenPopup("###wifi_confirmation");
+            };
+            ImGui::BeginDisabled(worker.busy() || !fresh_scan || !valid_wifi);
+            if (ImGui::Button(tr(Key::WifiNormal))) request_wifi(net::WifiMode::normal);
+            if (ImGui::Button(tr(Key::WifiAssist))) request_wifi(net::WifiMode::assisted);
+            ImGui::EndDisabled();
+            if (!fresh_scan || !chosen) {
+                ImGui::BeginDisabled(worker.busy());
+                if (ImGui::Button(tr(Key::WifiStart))) page = 4;
+                ImGui::EndDisabled();
+            }
+            if (chosen && !valid_wifi) paragraph(tr(Key::WifiSavedRequired));
+#ifdef _WIN32
+            if (ImGui::Button(tr(Key::WifiSettings))) open_windows_wifi();
+            if (wifi_settings_failed) paragraph(tr(Key::WifiSettingsFailed));
+#endif
+            const std::string wifi_title = std::string(tr(Key::WifiConfirm)) + "###wifi_confirmation";
+            if (wifi_confirmation) ImGui::SetNextWindowSizeConstraints({std::min(450 * dpi, vp->WorkSize.x), 0}, {std::min(640 * dpi, vp->WorkSize.x), vp->WorkSize.y});
+            if (ImGui::BeginPopupModal(wifi_title.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                if (wifi_confirmation) {
+                    field(tr(Key::WifiNetwork), wifi_confirmation->ssid);
+                    paragraph(tr(wifi_mode == net::WifiMode::normal ? Key::WifiNormal : Key::WifiAssist));
+                    paragraph(tr(Key::WifiConfirmDetail));
+                    if (wifi_mode == net::WifiMode::assisted) {
+                        paragraph(tr(Key::WifiAssistLimit)); paragraph(tr(Key::WifiSignalHint));
+                    }
+                }
+                ImGui::BeginDisabled(!fresh_scan || worker.busy() || !wifi_confirmation);
+                if (ImGui::Button(tr(Key::Proceed))) {
+                    worker.wifi(*wifi_confirmation, wifi_mode); wifi_confirmation.reset(); ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndDisabled(); ImGui::SameLine();
+                if (ImGui::Button(tr(Key::Dismiss))) { wifi_confirmation.reset(); ImGui::CloseCurrentPopup(); }
+                ImGui::EndPopup();
+            }
+            if (view.wifi) wifi_result(*view.wifi);
+            if (!ImGui::CollapsingHeader(tr(Key::WifiLabSection))) break;
             field(tr(Key::CurrentWindowsProfile), active ? active->profile : ""); field(tr(Key::SelectedBssid), chosen ? chosen->bssid : "");
             field(tr(Key::SelectedWindowsProfile), chosen ? chosen->profile : "");
             paragraph(tr(Key::WindowsObtainsItsOwnIp));

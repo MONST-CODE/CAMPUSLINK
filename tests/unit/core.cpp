@@ -50,11 +50,45 @@ struct Mock final : net::Backend {
         if (rollback_wrong_route && connections == 2) interface.gateway.clear();
         return {};
     }
+    std::optional<net::Error> connect_profile(const net::Bss& b, std::stop_token stop) override { return connect(b, stop); }
     net::Observation measure(const net::Interface&, const net::Scope&, std::stop_token) override {
         ++probes; if (cancel_in_measure) cancel_in_measure->request_stop();
         auto o = good(); o.endpoint_verified = !failure; return o;
     }
 };
+struct WifiMock final : net::Backend {
+    net::Snapshot topology;
+    net::Reachability report{net::Reachability::unknown};
+    unsigned normal{}, pinned{}, probes{};
+    bool fail_first{}, fail_all{}, fail_recovery{}, alternate_on_normal{}, unsettled{};
+    std::vector<std::string> interfaces;
+    net::Snapshot inspect(std::stop_token) override { return topology; }
+    net::Discovery scan(std::stop_token) override { return {}; }
+    std::optional<net::Error> apply(const net::Bss& b, bool exact) {
+        interfaces.push_back(b.interface_id);
+        auto it = std::find_if(topology.interfaces.begin(), topology.interfaces.end(), [&](const auto& i) { return i.id == b.interface_id; });
+        if (it == topology.interfaces.end()) return net::Error{"mock", 1, "missing"};
+        if ((fail_first && interfaces.size() == 1) || (fail_all && b.profile != "Previous") || (fail_recovery && b.profile == "Previous")) {
+            it->associated = false;
+            return net::Error{"mock", 1460, "timeout", unsettled};
+        }
+        it->associated = it->up = true;
+        it->ssid = b.ssid;
+        it->profile = b.profile;
+        it->bssid = !exact && alternate_on_normal ? "02:00:00:00:00:10" : b.bssid;
+        it->address = "192.0.2.100";
+        it->gateway = "192.0.2.1";
+        return {};
+    }
+    std::optional<net::Error> connect(const net::Bss& b, std::stop_token) override { ++pinned; return apply(b, true); }
+    std::optional<net::Error> connect_profile(const net::Bss& b, std::stop_token) override { ++normal; return apply(b, false); }
+    net::Reachability reachability(const net::Interface&) override { return report; }
+    net::Observation measure(const net::Interface&, const net::Scope&, std::stop_token) override { ++probes; return {}; }
+};
+net::Interface wifi_interface(std::string id, std::string device) {
+    net::Interface i; i.wireless = i.hardware_interface = i.wlan_idle = true; i.id = std::move(id); i.device_instance = std::move(device); return i;
+}
+
 }
 int main() {
     using sim::Scenario; using sim::State;
@@ -84,6 +118,61 @@ int main() {
         std::ofstream(file) << "invalid\n";
         require(load_preferences(file).invalid && load_preferences(file).value == defaults.value, "corrupt config did not fall back");
         require(!decode(encode(alternate) + "junk"), "accepted trailing settings data");
+    });
+    check("normal Wi-Fi delegates BSSID selection to Windows without a scope or probes", [] {
+        WifiMock b; b.topology.interfaces = {wifi_interface("wifi0", "radio0")}; b.alternate_on_normal = true;
+        b.report = net::Reachability::internet;
+        const auto result = net::connect_wifi(b, target, {{target}, {}}, net::WifiMode::normal, {});
+        require(result.status == net::WifiStatus::internet_reported && b.normal == 1 && b.pinned == 0 && b.probes == 0 &&
+            result.link && result.link->bssid != target.bssid, "ordinary connect incorrectly pinned the selected access point");
+    });
+    check("direct Wi-Fi assistance works without a normal attempt and prefers an independent idle radio on failure", [] {
+        WifiMock b; b.topology.interfaces = {wifi_interface("wifi0", "radio0"), wifi_interface("wifi1", "radio1"), wifi_interface("wifi2", "radio0")};
+        auto other = target; other.interface_id = "wifi1"; other.bssid.back() = '3'; other.rssi = -70;
+        auto same_device = other; same_device.interface_id = "wifi2"; same_device.rssi = -20;
+        auto different_ssid = other; different_ssid.ssid = "Another network"; different_ssid.rssi = -25;
+        auto unauth = other; unauth.profile.clear(); unauth.rssi = -10;
+        b.fail_first = true;
+        const auto result = net::connect_wifi(b, target, {{target, same_device, other, different_ssid, unauth}, {}}, net::WifiMode::assisted, {});
+        require(result.status == net::WifiStatus::local_link && b.normal == 0 && b.pinned == 2 && b.probes == 0 &&
+            b.interfaces == std::vector<std::string>{"wifi0", "wifi1"}, "assistance invoked normal mode or used a non-independent candidate");
+    });
+    check("assistance preserves a local-only link for sign-in and refuses stale identity and busy radios", [] {
+        WifiMock b; b.topology.interfaces = {wifi_interface("wifi0", "radio0"), wifi_interface("wifi1", "radio1")};
+        b.topology.interfaces[1].associated = true;
+        auto other = target; other.interface_id = "wifi1"; other.bssid.back() = '3';
+        auto alternate = target; alternate.bssid.back() = '4';
+        const net::Discovery scan{{target, alternate, other}, {}};
+        const auto plan = net::wifi_plan(target, scan, b.topology, net::WifiMode::assisted);
+        require(plan.size() == 2 && plan[1].bssid == alternate.bssid, "busy radio was picked");
+        auto substituted = target; substituted.ssid += "X";
+        require(net::connect_wifi(b, substituted, scan, net::WifiMode::assisted, {}).status == net::WifiStatus::invalid && b.pinned == 0, "invalid target mutated host");
+        b.report = net::Reachability::local_only;
+        const auto result = net::connect_wifi(b, target, scan, net::WifiMode::assisted, {});
+        require(result.status == net::WifiStatus::local_link && result.evidence == net::Reachability::local_only && b.pinned == 1,
+            "local-only was marked online or disrupted by additional retry");
+    });
+    check("assistance stops when Windows cannot cancel the previous request", [] {
+        WifiMock b; b.topology.interfaces = {wifi_interface("wifi0", "radio0")};
+        auto alternative = target; alternative.bssid.back() = '3';
+        b.fail_first = b.unsettled = true;
+        const auto r = net::connect_wifi(b, target, {{target, alternative}, {}}, net::WifiMode::assisted, {});
+        require(r.status == net::WifiStatus::request_unsettled && b.pinned == 1, "retry followed a possibly pending request");
+    });
+    check("Wi-Fi failures verify rollback and cancellation prevents further attempts", [] {
+        WifiMock b;
+        auto previous = wifi_interface("wifi0", "radio0"); previous.associated = previous.up = true;
+        previous.profile = "Previous"; previous.ssid = "Old"; previous.bssid = "02:00:00:00:00:19";
+        previous.address = "192.0.2.102"; previous.gateway = "192.0.2.1";
+        b.topology.interfaces = {previous}; b.fail_all = true;
+        const auto failed = net::connect_wifi(b, target, {{target}, {}}, net::WifiMode::normal, {});
+        require(failed.status == net::WifiStatus::failed && failed.restored && b.pinned == 1 && b.normal == 1, "previous link not verified after rollback");
+        b.fail_recovery = true;
+        const auto unknown = net::connect_wifi(b, target, {{target}, {}}, net::WifiMode::assisted, {});
+        require(unknown.status == net::WifiStatus::recovery_failed && !unknown.restored, "rollback failure hidden");
+        auto token = std::make_unique<std::stop_source>(); token->request_stop();
+        const auto stopped = net::connect_wifi(b, target, {{target}, {}}, net::WifiMode::assisted, token->get_token());
+        require(stopped.status == net::WifiStatus::cancelled && b.pinned == 3, "cancelled run made an attempt");
     });
     for (const auto& [s, expected] : std::array{
         std::pair{Scenario::healthy, State::online}, std::pair{Scenario::pool, State::exhausted},
