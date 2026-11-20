@@ -63,7 +63,9 @@ struct Bss {
     bool infrastructure{true};
 };
 struct Snapshot { std::vector<Interface> interfaces; std::vector<Error> errors; };
-struct Discovery { std::vector<Bss> bss; std::vector<Error> errors; };
+// cached: Windows did not confirm a fresh scan for at least one adapter; its recent list was used.
+// stale_dropped: entries ignored because Windows last heard them more than two minutes ago.
+struct Discovery { std::vector<Bss> bss; std::vector<Error> errors; bool cached{}; unsigned stale_dropped{}; };
 struct Distribution {
     unsigned count{};
     std::optional<double> mean, median, p95, minimum, maximum;
@@ -199,6 +201,13 @@ struct WifiResult {
     Clock::time_point finished{};
     std::chrono::milliseconds elapsed{};
 };
+// Explainable pre-selection of the assisted starting access point among saved, infrastructure
+// candidates. 5/6 GHz gets a 6 dB preference when its reported signal is at least -72 dBm (less
+// crowded spectrum, wider channels); otherwise the strongest reported signal wins. This is a
+// heuristic on scan data, not a throughput measurement.
+enum class StartReason { strongest, wider_band };
+struct StartChoice { std::size_t index{}; StartReason reason{}; };
+std::optional<StartChoice> recommend_start(std::span<const Bss> candidates);
 std::vector<Bss> wifi_plan(const Bss& selected, const Discovery&, const Snapshot&, WifiMode, WifiPolicy = {}, Clock::time_point = Clock::now());
 WifiResult connect_wifi(Backend&, const Bss& selected, const Discovery&, WifiMode, std::stop_token, WifiPolicy = {});
 Backend& platform();

@@ -5,6 +5,7 @@
 #include "campuslink/simulation.hpp"
 #include "campuslink/ui_text.hpp"
 #include "appearance.hpp"
+#include "widgets.hpp"
 
 #include <SDL3/SDL.h>
 #include "imgui.h"
@@ -15,11 +16,13 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdarg>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <future>
+#include <map>
 #include <set>
 #include <memory>
 #include <mutex>
@@ -32,17 +35,29 @@
 namespace campuslink::ui {
 namespace {
 using namespace std::chrono_literals;
+namespace w = widget;
 thread_local Language language{Language::fr};
 thread_local Theme color_theme{Theme::light};
 const char* tr(Key key) { return translate(language, key); }
 std::string message(std::string_view value) { return localize(language, value); }
+std::string format(const char* pattern, ...) {
+    char buffer[512];
+    va_list args;
+    va_start(args, pattern);
+    std::vsnprintf(buffer, sizeof buffer, pattern, args);
+    va_end(args);
+    return buffer;
+}
 namespace fs = std::filesystem;
 struct Log { long long when; std::string level, module, event; unsigned code{}; };
 struct View {
     std::string status{english(Key::Ready)};
     net::Snapshot hardware;
     net::Discovery discovery;
+    std::vector<std::pair<std::string, net::Reachability>> reach; // Windows report per associated adapter
     std::optional<net::WifiResult> wifi;
+    std::optional<net::WifiProgress> wifi_progress;               // engine-confirmed stage while running
+    net::WifiMode wifi_mode{net::WifiMode::normal};
     std::vector<net::WifiHistory> wifi_history;
     std::optional<std::array<lab::Result, 3>> path_lab;
     int path_lab_scenario{};
@@ -57,8 +72,16 @@ struct View {
     std::array<unsigned, static_cast<unsigned>(sim::State::count)> counts{};
     std::vector<Log> logs;
     unsigned client_count{}, events{}, simulated_ms{}, overlapping_validated_windows{};
-    net::Clock::time_point scan_at{}, last_handoff{};
+    net::Clock::time_point scan_at{}, last_handoff{}, inspected_at{}, wifi_ready{}, scan_ready{};
+    bool scanning{};
 };
+constexpr auto wifi_cooldown = 15s;
+constexpr auto scan_cooldown = 10s;
+std::vector<std::pair<std::string, net::Reachability>> reachability(const net::Snapshot& s) {
+    std::vector<std::pair<std::string, net::Reachability>> out;
+    for (const auto& i : s.interfaces) if (i.wireless && i.associated) out.emplace_back(i.id, net::platform().reachability(i));
+    return out;
+}
 class Worker {
     mutable std::mutex lock_;
     View view_;
@@ -107,6 +130,7 @@ public:
                     update([](View& v) { v.status = english(Key::UnexpectedWorkerError); });
                     log("ERROR", label, english(Key::UnexpectedNonStandardException));
                 }
+                update([](View& v) { v.scanning = false; v.wifi_progress.reset(); });
                 busy_ = false;
             });
         } catch (const std::exception& e) {
@@ -134,47 +158,62 @@ public:
     void inspect() {
         run(english(Key::HardwareInventory), [this](auto stop) {
             auto data = net::platform().inspect(stop);
+            auto reach = reachability(data);
             const auto summary = data.interfaces.empty() ? english(Key::NoInterfacesReported) : english(Key::InventoryRefreshed);
             for (const auto& e : data.errors) log("WARN", "inventory", e.operation, e.code);
-            update([&](View& v) { v.hardware = std::move(data); v.status = summary; });
+            update([&](View& v) {
+                v.hardware = std::move(data); v.reach = std::move(reach); v.inspected_at = net::Clock::now(); v.status = summary;
+            });
         });
     }
     void scan() {
         run(english(Key::WindowsWlanDiscovery), [this](auto stop) {
-            if (net::Clock::now() - last_scan_ < 10s) throw std::runtime_error(english(Key::DiscoveryCooldown10Seconds));
+            if (net::Clock::now() - last_scan_ < scan_cooldown) throw std::runtime_error(english(Key::DiscoveryCooldown10Seconds));
             last_scan_ = net::Clock::now();
+            update([&](View& v) { v.scanning = true; v.scan_ready = last_scan_ + scan_cooldown; });
             auto hardware = net::platform().inspect(stop);
             auto data = net::platform().scan(stop);
+            auto reach = reachability(hardware);
             for (const auto& e : data.errors) log("WARN", "discovery", e.operation, e.code);
             update([&](View& v) {
-                v.hardware = std::move(hardware); v.discovery = std::move(data);
+                v.hardware = std::move(hardware); v.discovery = std::move(data); v.reach = std::move(reach);
+                v.inspected_at = net::Clock::now();
                 v.scan_at = stop.stop_requested() ? net::Clock::time_point{} : net::Clock::now();
                 v.status = english(Key::DiscoveryCompletedReviewNativeStatus);
             });
         });
     }
-    void wifi(net::Bss selected, net::WifiMode mode, unsigned budget) {
-        run(english(mode == net::WifiMode::normal ? Key::WifiNormal : Key::WifiAssist), [this, selected = std::move(selected), mode, budget](auto stop) {
+    void wifi(net::Bss selected, net::WifiMode mode) {
+        run(english(mode == net::WifiMode::normal ? Key::WifiNormal : Key::WifiAssist), [this, selected = std::move(selected), mode](auto stop) {
             const auto now = net::Clock::now();
-            if (now - last_wifi_ < 15s) throw std::runtime_error(english(Key::WifiCooldown));
+            if (now - last_wifi_ < wifi_cooldown) throw std::runtime_error(english(Key::WifiCooldown));
             const auto saved = copy();
-            if (saved.scan_at == net::Clock::time_point{} || now - saved.scan_at >= 2min)
+            if (saved.scan_at == net::Clock::time_point{} || now - saved.scan_at >= net::wifi_scan_ttl)
                 throw std::runtime_error(english(Key::WifiCannotStart));
             last_wifi_ = now;
-            auto result = net::connect_wifi(net::platform(), selected, saved.discovery, mode, stop, {budget, saved.scan_at, saved.wifi_history});
+            update([&](View& v) {
+                v.wifi.reset(); v.wifi_mode = mode; v.wifi_ready = now + wifi_cooldown;
+                v.wifi_progress = net::WifiProgress{net::WifiStage::preparing, 0, 0, selected.bssid};
+            });
+            net::WifiPolicy policy{net::wifi_default_attempts, saved.scan_at, saved.wifi_history};
+            policy.progress = [this](const net::WifiProgress& p) { update([&](View& v) { v.wifi_progress = p; }); };
+            auto result = net::connect_wifi(net::platform(), selected, saved.discovery, mode, stop, policy);
             for (const auto& attempt : result.attempts) if (attempt.error) log("WARN", "handoff", attempt.error->operation, attempt.error->code);
             auto hardware = net::platform().inspect({});
+            auto reach = reachability(hardware);
             update([&](View& v) {
+                // Only association-level outcomes describe an access point; address and
+                // authentication problems are network-wide and must not demote a BSSID.
                 if (mode == net::WifiMode::assisted && result.status != net::WifiStatus::cancelled &&
                     result.status != net::WifiStatus::request_unsettled && result.status != net::WifiStatus::recovery_failed && !stop.stop_requested()) {
                     for (const auto& a : result.attempts) {
-                        if (a.error && a.error->wifi_failure != net::WifiFailure::ip_unconfirmed &&
-                            a.error->wifi_failure != net::WifiFailure::association_unconfirmed) continue;
+                        if (a.error && !net::retry_elsewhere(a.error->wifi_failure)) continue;
                         if (v.wifi_history.size() >= 64) v.wifi_history.erase(v.wifi_history.begin());
                         v.wifi_history.push_back({a.candidate, result.finished, !a.error});
                     }
                 }
-                v.wifi = std::move(result); v.hardware = std::move(hardware);
+                v.wifi = std::move(result); v.hardware = std::move(hardware); v.reach = std::move(reach);
+                v.inspected_at = net::Clock::now(); v.wifi_progress.reset();
                 v.status = english(Key::WifiResults);
             });
         });
@@ -269,7 +308,7 @@ public:
             }
             if (!stop.stop_requested()) hardware = net::platform().inspect(stop);
             update([&](View& v) {
-                if (!stop.stop_requested()) v.hardware = std::move(hardware);
+                if (!stop.stop_requested()) { v.hardware = std::move(hardware); v.inspected_at = net::Clock::now(); }
                 v.status = std::string(english(Key::PhysicalResults)) + std::to_string(v.outcomes.size()) + " / " + std::to_string(requested.size()) + english(Key::CompletedReviewEachOutcome);
             });
         });
@@ -403,7 +442,8 @@ struct Display {
     }
 };
 
-void text(std::string_view s) { ImGui::TextUnformatted(s.data(), s.data() + s.size()); }
+// ---- small helpers shared by lab panels ----------------------------------------------------
+void text(std::string_view s) { w::text(s); }
 std::string radio_roles(std::string_view list) {
     std::string result;
     while (!list.empty()) {
@@ -415,23 +455,41 @@ std::string radio_roles(std::string_view list) {
     }
     return result;
 }
-void paragraph(const std::string& s) { ImGui::PushTextWrapPos(0); text(s); ImGui::PopTextWrapPos(); }
+void paragraph(const std::string& s) { w::wrapped(s); }
+const Palette& colors() { return palette(color_theme); }
 void errors(const std::vector<net::Error>& list) {
     for (const auto& e : list) {
-        ImGui::TextColored(palette(color_theme).caution, "%s [%u]", message(e.operation).c_str(), e.code);
+        ImGui::TextColored(colors().warning.strong, "%s [%u]", message(e.operation).c_str(), e.code);
         paragraph(message(e.detail));
     }
 }
-void field(const char* name, const std::string& v) { ImGui::Text("%s: %s", name, v.empty() ? tr(Key::Unknown) : v.c_str()); }
+void field(const char* name, const std::string& v) {
+    ImGui::TextColored(colors().muted, "%s", name); ImGui::SameLine();
+    text(v.empty() ? tr(Key::Unknown) : v);
+}
 std::string reported(std::optional<bool> value) { return !value ? "" : *value ? tr(Key::Yes) : tr(Key::No); }
 void metric(const char* name, std::optional<double> v, const char* unit) {
     if (v) ImGui::Text("%-18s %8.2f %s", name, *v, unit); else ImGui::Text(tr(Key::Value18sUnverified), name);
 }
 void number_input(const char* label, unsigned& v) { ImGui::InputScalar(label, ImGuiDataType_U32, &v); }
-constexpr std::array page_keys{Key::Overview, Key::HardwareLab, Key::RadioCapabilities, Key::VirtualClientLab, Key::NetworkDiscovery,
-    Key::ExperimentCenter, Key::PerformanceLab, Key::IntelligenceEngine, Key::ConnectionManager, Key::LogsDiagnostics, Key::Settings, Key::About, Key::PathSpace};
+// Checkbox whose label wraps instead of being clipped at narrow widths.
+bool consent_box(const char* id, const char* label, bool* value) {
+    const bool changed = ImGui::Checkbox(id, value);
+    ImGui::SameLine();
+    w::wrapped(label);
+    return changed;
+}
+
+enum class Page { connect, diagnostics, hardware, radio, discovery, virtual_lab, experiments, trials, performance, intelligence, paths, settings, about, count };
+constexpr auto page_count = static_cast<unsigned>(Page::count);
+constexpr std::array<Key, page_count> page_keys{Key::NavConnect, Key::LogsDiagnostics, Key::HardwareLab, Key::RadioCapabilities, Key::NetworkDiscovery,
+    Key::VirtualClientLab, Key::ExperimentCenter, Key::LabTrialsTitle, Key::PerformanceLab, Key::IntelligenceEngine, Key::PathSpace, Key::Settings, Key::About};
+struct NavGroup { Key title; Page first, last; };
+constexpr std::array nav_groups{NavGroup{Key::NavSectionConnect, Page::connect, Page::diagnostics},
+    NavGroup{Key::NavSectionLab, Page::hardware, Page::paths}, NavGroup{Key::NavSectionApp, Page::settings, Page::about}};
+
 void language_control(Preferences& prefs) {
-    ImGui::SetNextItemWidth(76 * ImGui::GetStyle().FontScaleDpi);
+    ImGui::SetNextItemWidth(w::px(64));
     if (ImGui::BeginCombo("##language", prefs.language == Language::fr ? "FR" : "EN")) {
         if (ImGui::Selectable(tr(Key::UseFrench), prefs.language == Language::fr)) prefs.language = Language::fr;
         if (ImGui::Selectable(tr(Key::UseEnglish), prefs.language == Language::en)) prefs.language = Language::en;
@@ -440,30 +498,94 @@ void language_control(Preferences& prefs) {
     ImGui::SetItemTooltip("%s", tr(Key::Language));
 }
 void theme_control(Preferences& prefs) {
-    if (ImGui::Button(tr(prefs.theme == Theme::light ? Key::Light : Key::Dark))) prefs.theme = prefs.theme == Theme::light ? Theme::dark : Theme::light;
+    if (w::button(colors(), tr(prefs.theme == Theme::light ? Key::Light : Key::Dark), w::Kind::secondary))
+        prefs.theme = prefs.theme == Theme::light ? Theme::dark : Theme::light;
     ImGui::SetItemTooltip("%s", tr(Key::Theme));
 }
-void metric_cards(unsigned a, unsigned b, unsigned c) {
-    constexpr std::array labels{Key::InterfaceCount, Key::DiscoveredBss, Key::LogicalEvents};
-    const std::array values{a, b, c};
-    const auto cols = ImGui::GetContentRegionAvail().x < ImGui::GetFontSize() * 30 ? 1 : 3;
-    if (ImGui::BeginTable("overview_metrics", cols, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_NoSavedSettings)) {
-        for (std::size_t j = 0; j < values.size(); ++j) {
-            ImGui::TableNextColumn(); ImGui::PushID(static_cast<int>(j));
-            const auto height = ImGui::GetTextLineHeightWithSpacing() * 2.8f;
-            if (ImGui::BeginChild("metric", {0, height}, ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar)) {
-                ImGui::TextDisabled("%s", tr(labels[j]));
-                ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 1.45f);
-                ImGui::TextColored(palette(color_theme).key, "%u", values[j]);
-                ImGui::PopFont();
-            }
-            ImGui::EndChild(); ImGui::PopID();
-        }
-        ImGui::EndTable();
-    }
+std::string age_text(net::Clock::time_point at, Key seconds, Key minutes) {
+    const auto age = std::chrono::duration_cast<std::chrono::seconds>(net::Clock::now() - at).count();
+    return age < 120 ? format(tr(seconds), static_cast<long long>(std::max<long long>(0, age))) : format(tr(minutes), static_cast<long long>(age / 60));
 }
+const char* band_name(unsigned mhz) { return mhz >= 5925 ? "6 GHz" : mhz >= 4900 ? "5 GHz" : mhz >= 2400 ? "2,4 GHz" : ""; }
+std::string band_label(unsigned mhz) {
+    std::string b = band_name(mhz);
+    if (language == Language::en && b == "2,4 GHz") b = "2.4 GHz";
+    return b;
+}
+Key failure_key(net::WifiFailure f) {
+    switch (f) {
+    case net::WifiFailure::authentication: return Key::CauseAuth;
+    case net::WifiFailure::profile: return Key::CauseProfile;
+    case net::WifiFailure::radio: return Key::CauseRadio;
+    case net::WifiFailure::association_unconfirmed: return Key::CauseAssociation;
+    case net::WifiFailure::ip_unconfirmed: return Key::CauseAddress;
+    case net::WifiFailure::request: return Key::CauseRequest;
+    case net::WifiFailure::unspecified: break;
+    }
+    return Key::CauseUnknown;
+}
+Key failure_advice(net::WifiFailure f) {
+    switch (f) {
+    case net::WifiFailure::authentication: return Key::FailAuth;
+    case net::WifiFailure::profile: return Key::FailProfile;
+    case net::WifiFailure::radio: return Key::FailRadio;
+    case net::WifiFailure::association_unconfirmed: return Key::FailAssociation;
+    case net::WifiFailure::ip_unconfirmed: return Key::FailAddress;
+    case net::WifiFailure::request: return Key::FailRequest;
+    case net::WifiFailure::unspecified: break;
+    }
+    return Key::WifiFailed;
+}
+
+// A network as people think of it: one name, possibly many access points and adapters.
+struct Network {
+    std::string key, ssid, label, security;
+    std::vector<std::size_t> members; // indices into Discovery::bss, strongest first
+    int best_rssi{-127};
+    unsigned bands{}; // 1 = 2.4 GHz, 2 = 5 GHz, 4 = 6 GHz
+    bool saved{}, secured{}, connected{};
+    std::size_t access_points{};
+};
+std::vector<Network> group_networks(const View& v) {
+    std::map<std::string, Network> groups;
+    for (std::size_t i = 0; i < v.discovery.bss.size(); ++i) {
+        const auto& b = v.discovery.bss[i];
+        if (!b.infrastructure) continue;
+        auto key = b.ssid + '\n' + b.security;
+        auto& n = groups[key];
+        if (n.members.empty()) {
+            n.key = key; n.ssid = b.ssid; n.security = b.security;
+            n.label = b.ssid.empty() ? std::string(tr(Key::HiddenNetwork)) : net::display_ssid(b.ssid);
+            n.secured = b.security.starts_with("Privacy bit set");
+        }
+        n.members.push_back(i);
+        n.best_rssi = std::max(n.best_rssi, b.rssi);
+        n.bands |= b.mhz >= 5925 ? 4u : b.mhz >= 4900 ? 2u : 1u;
+        n.saved = n.saved || !b.profile.empty();
+    }
+    std::vector<Network> out;
+    out.reserve(groups.size());
+    for (auto& [key, n] : groups) {
+        std::sort(n.members.begin(), n.members.end(), [&](auto a, auto b) { return v.discovery.bss[a].rssi > v.discovery.bss[b].rssi; });
+        std::set<std::string> distinct;
+        for (const auto m : n.members) distinct.insert(v.discovery.bss[m].bssid);
+        n.access_points = distinct.size();
+        for (const auto& i : v.hardware.interfaces)
+            if (i.wireless && i.associated && !n.ssid.empty() && i.ssid == n.ssid) n.connected = true;
+        out.push_back(std::move(n));
+    }
+    std::sort(out.begin(), out.end(), [](const Network& a, const Network& b) {
+        if (a.connected != b.connected) return a.connected;
+        if (a.saved != b.saved) return a.saved;
+        if (a.best_rssi != b.best_rssi) return a.best_rssi > b.best_rssi;
+        return a.label < b.label;
+    });
+    return out;
+}
+
 struct Screen {
-    int page{}, selected_bss{-1};
+    Page page{Page::connect};
+    int selected_bss{-1};
     bool export_csv{}, consent{}, warnings_only{};
     bool unreadable_preferences{}, unsaved_preferences{}, reset_display{};
     std::vector<net::Experiment> confirmation;
@@ -474,14 +596,18 @@ struct Screen {
     unsigned logical_selected{}, logical_page{1};
     std::vector<net::Bss> batch;
     int measurement_offset{};
-    ImGuiTextFilter discovery_filter;
+    ImGuiTextFilter discovery_filter, network_filter;
+    std::string selected_network;   // Network::key
+    std::string start_bssid;        // assisted start access point (bssid + interface)
+    std::string start_interface;
+    bool fixture{};                 // smoke rendering with sample data; never set in normal use
 
     sim::Config config;
     sim::Budget budget;
     std::array<double,5> weights{net::base_weights};
     net::Clock::time_point refresh{};
     std::size_t seen_revision{};
-    int wifi_budget{3}, path_scenario{};
+    int path_scenario{};
     bool path_consent{};
     View view;
     void request(std::vector<net::Experiment> experiments, bool from_queue = false) {
@@ -495,80 +621,514 @@ struct Screen {
         wifi_settings_failed = !SDL_OpenURL("ms-settings:network-wifi");
 #endif
     }
-    void wifi_result(const net::WifiResult& result) {
-        ImGui::SeparatorText(tr(Key::WifiResults));
-        Key label{Key::WifiCannotStart};
-        switch (result.status) {
-        case net::WifiStatus::invalid: break;
-        case net::WifiStatus::cancelled: label = Key::WifiCancel; break;
-        case net::WifiStatus::failed: label = Key::WifiFailed; break;
-        case net::WifiStatus::recovery_failed: label = Key::WifiRecovery; break;
-        case net::WifiStatus::request_unsettled: label = Key::WifiUnsettled; break;
-        case net::WifiStatus::local_link: label = Key::WifiLocal; break;
-        case net::WifiStatus::internet_reported: label = Key::WifiInternet; break;
-        case net::WifiStatus::ip_pending: case net::WifiStatus::portal: label = Key::WifiLocal; break;
+    // Windows' own captive-portal probe target: it redirects to the sign-in page when one exists.
+    void open_sign_in() { SDL_OpenURL("http://www.msftconnecttest.com/redirect"); }
+    const net::Interface* active_wifi() const {
+        for (const auto& i : view.hardware.interfaces) if (i.wireless && i.associated) return &i;
+        return nullptr;
+    }
+    std::optional<net::Reachability> reach_of(const net::Interface& i) const {
+        for (const auto& [id, r] : view.reach) if (id == i.id) return r;
+        return std::nullopt;
+    }
+    void start_wifi(Worker& worker, const net::Bss& target, net::WifiMode mode) {
+        const auto* active = active_wifi();
+        const bool disruptive = active && active->id == target.interface_id && !(active->ssid == target.ssid && active->profile == target.profile);
+        wifi_mode = mode;
+        if (disruptive) { wifi_confirmation = target; ImGui::OpenPopup("###wifi_switch"); return; }
+        worker.wifi(target, mode);
+    }
+
+    // ---- page chrome ------------------------------------------------------------------------
+    void page_header(Key title, const char* subtitle = nullptr) {
+        w::display(colors(), tr(title));
+        if (subtitle) w::caption(colors(), subtitle);
+        w::gap(space::md);
+    }
+    void top_bar(Worker& worker, Preferences& prefs) {
+        const auto& c = colors();
+        const float height = ImGui::GetFrameHeight() + w::px(space::md) * 2;
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, c.surface);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {w::px(space::lg), w::px(space::md)});
+        ImGui::BeginChild("TopBar", {0, height}, ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding,
+            ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::AlignTextToFramePadding();
+        ImGui::PushFont(nullptr, w::body_size() * type::heading);
+        ImGui::TextColored(c.accent_text, "CAMPUSLINK");
+        ImGui::PopFont();
+        const bool narrow = ImGui::GetContentRegionAvail().x < w::px(640);
+        if (!narrow) { ImGui::SameLine(); ImGui::AlignTextToFramePadding(); ImGui::TextColored(c.muted, "%s", tr(Key::AppTagline)); }
+        // Right-aligned controls.
+        const float stop_w = worker.busy() ? ImGui::CalcTextSize(tr(Key::StopTask)).x + w::px(space::lg) * 2 + w::px(space::sm) : 0;
+        const float busy_w = worker.busy() ? ImGui::CalcTextSize(tr(Key::Busy)).x * type::caption + w::px(24) : 0;
+        const float theme_w = ImGui::CalcTextSize(tr(prefs.theme == Theme::light ? Key::Light : Key::Dark)).x + w::px(space::lg) * 2;
+        const float right = w::px(64) + theme_w + stop_w + busy_w + w::px(space::sm) * 3;
+        ImGui::SameLine(std::max(ImGui::GetCursorPosX() + w::px(space::lg), ImGui::GetWindowContentRegionMax().x - right));
+        if (worker.busy()) {
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (ImGui::GetFrameHeight() - ImGui::GetTextLineHeight() * type::caption - w::px(6)) * 0.5f);
+            w::badge(c.info, tr(Key::Busy)); ImGui::SameLine();
+            ImGui::SetCursorPosY(w::px(space::md));
+            if (w::button(c, tr(Key::StopTask), w::Kind::danger)) worker.stop();
+            ImGui::SameLine();
         }
-        paragraph(tr(label));
-        if (result.link) {
-            field(tr(Key::ActiveWirelessInterface), result.link->description.empty() ? result.link->name : result.link->description);
-            field(tr(Key::AssociatedSsid), result.link->ssid);
-            field(tr(Key::Bssid), result.link->bssid);
-            field(tr(Key::Ipv4), result.link->address);
-            field(tr(Key::Gateway), result.link->gateway);
-            metric(tr(Key::Rssi), result.link->rssi ? std::optional<double>(*result.link->rssi) : std::nullopt, tr(Key::Dbm));
-            if (result.link->rx_mbps > 0 && result.link->tx_mbps > 0)
-                ImGui::Text(tr(Key::LinkRatesReportedRx1f), result.link->rx_mbps, result.link->tx_mbps);
-            if (result.status == net::WifiStatus::local_link) paragraph(tr(Key::WifiPortalHelp));
+        language_control(prefs); ImGui::SameLine(); theme_control(prefs);
+        ImGui::EndChild();
+        ImGui::PopStyleVar(); ImGui::PopStyleColor();
+    }
+    void navigation(float width) {
+        const auto& c = colors();
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, c.surface);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {w::px(space::sm), w::px(space::md)});
+        ImGui::BeginChild("Navigation", {width, 0}, ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding);
+        for (const auto& group : nav_groups) {
+            ImGui::Indent(w::px(space::sm));
+            w::section(c, tr(group.title));
+            ImGui::Unindent(w::px(space::sm));
+            for (auto p = static_cast<unsigned>(group.first); p <= static_cast<unsigned>(group.last); ++p) {
+                const bool selected = page == static_cast<Page>(p);
+                const auto label = std::string(tr(page_keys[p])) + "###nav" + std::to_string(p);
+                ImGui::PushStyleColor(ImGuiCol_Header, c.accent_soft);
+                ImGui::PushStyleColor(ImGuiCol_HeaderHovered, selected ? c.accent_soft : c.raised);
+                ImGui::PushStyleColor(ImGuiCol_HeaderActive, c.accent_soft);
+                ImGui::PushStyleColor(ImGuiCol_Text, selected ? c.accent_text : c.text);
+                ImGui::PushStyleVar(ImGuiStyleVar_SelectableTextAlign, {0, 0.5f});
+                const auto pos = ImGui::GetCursorScreenPos();
+                ImGui::Indent(w::px(space::sm));
+                if (ImGui::Selectable(label.c_str(), selected, 0, {0, ImGui::GetFrameHeight()})) page = static_cast<Page>(p);
+                ImGui::Unindent(w::px(space::sm));
+                if (selected) ImGui::GetWindowDrawList()->AddRectFilled({pos.x, pos.y + w::px(6)}, {pos.x + w::px(3), pos.y + ImGui::GetFrameHeight() - w::px(6)},
+                    ImGui::GetColorU32(c.accent), w::px(2));
+                ImGui::PopStyleVar(); ImGui::PopStyleColor(4);
+            }
         }
-        if (result.restored) paragraph(tr(Key::WifiRestored));
-        metric(tr(Key::WifiTotalTime), static_cast<double>(result.elapsed.count()), tr(Key::Ms));
-        paragraph(tr(Key::PathTimingSource));
-        constexpr std::array reasons{Key::WifiReasonSelected, Key::WifiReasonIndependent, Key::WifiReasonSuccess, Key::WifiReasonFailure, Key::WifiReasonSignal};
-        for (const auto& attempt : result.attempts) {
-            field(tr(Key::SelectedBssid), attempt.candidate.bssid);
-            paragraph(tr(reasons[static_cast<unsigned>(attempt.reason)]));
-            const auto timing = [&](Key key, auto sample) { if (sample) metric(tr(key), static_cast<double>(sample->count()), tr(Key::Ms)); };
-            timing(Key::WifiAssociationTime, attempt.timing.association);
-            timing(Key::WifiUsableTime, attempt.timing.usable);
-            timing(Key::WifiInternetTime, attempt.timing.internet_reported);
-            if (!attempt.error) continue;
-            if (attempt.error->wifi_failure == net::WifiFailure::ip_unconfirmed) paragraph(tr(Key::WifiIpFailure));
-            if (attempt.error->wifi_failure == net::WifiFailure::association_unconfirmed) paragraph(tr(Key::WifiAssociationFailure));
-            errors({*attempt.error});
+        ImGui::Dummy({0, w::px(space::lg)});
+        ImGui::Indent(w::px(space::sm));
+        ImGui::TextColored(c.muted, "v%s", build::version);
+        ImGui::Unindent(w::px(space::sm));
+        ImGui::EndChild();
+        ImGui::PopStyleVar(); ImGui::PopStyleColor();
+    }
+
+    // ---- connection workspace ---------------------------------------------------------------
+    void current_connection_card(Worker& worker) {
+        const auto& c = colors();
+        if (!w::begin_card(c, "current")) { w::end_card(); return; }
+        const auto* active = active_wifi();
+        const bool any_wifi = std::any_of(view.hardware.interfaces.begin(), view.hardware.interfaces.end(), [](const auto& i) { return i.wireless; });
+        // Header: caption on the left, age + refresh on the right.
+        ImGui::AlignTextToFramePadding();
+        w::caption(c, tr(Key::CurrentConnection), false);
+        {
+            const auto age = view.inspected_at != net::Clock::time_point{} ? age_text(view.inspected_at, Key::UpdatedSeconds, Key::UpdatedMinutes) : std::string{};
+            ImGui::PushFont(nullptr, w::body_size() * type::caption);
+            const float age_w = age.empty() ? 0 : ImGui::CalcTextSize(age.c_str()).x + w::px(space::sm);
+            ImGui::PopFont();
+            const float refresh_w = ImGui::CalcTextSize(tr(Key::Refresh)).x + w::px(space::lg) * 2;
+            ImGui::SameLine(std::max(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - age_w - refresh_w));
+            if (!age.empty()) { ImGui::AlignTextToFramePadding(); w::caption(c, age, false); ImGui::SameLine(0, w::px(space::sm)); }
+            ImGui::BeginDisabled(worker.busy());
+            if (w::button(c, tr(Key::Refresh), w::Kind::ghost)) worker.inspect();
+            ImGui::EndDisabled();
+        }
+        if (!active) {
+            w::title(c, tr(Key::NotConnected));
+            w::caption(c, tr(any_wifi || view.hardware.interfaces.empty() ? Key::NotConnectedHint : Key::NoWifiAdapter));
+            w::end_card();
+            return;
+        }
+        // Network name with the Windows Internet report beside it.
+        w::title(c, net::display_ssid(active->ssid));
+        const auto reach = reach_of(*active);
+        const auto tone = !reach ? c.neutral : *reach == net::Reachability::internet ? c.success :
+            *reach == net::Reachability::portal || *reach == net::Reachability::local_only ? c.warning : c.neutral;
+        const auto label = !reach ? Key::ReachUnknown : *reach == net::Reachability::internet ? Key::InternetReported :
+            *reach == net::Reachability::portal ? Key::PortalReported : *reach == net::Reachability::local_only ? Key::LocalOnlyReported : Key::ReachUnknown;
+        w::badge(tone, tr(label));
+        w::gap(space::xs);
+        std::string band;
+        for (const auto& b : view.discovery.bss) if (b.bssid == active->bssid && b.interface_id == active->id) { band = band_label(b.mhz); break; }
+        // Channel numbers overlap between 2.4 GHz and 6 GHz: without the scanned frequency, show the channel only.
+        const bool band_known = !band.empty();
+        if (active->channel && *active->channel) band += (band.empty() ? "" : " · ") + std::to_string(*active->channel);
+        // Two label/value pairs per row when there is room, one otherwise.
+        const bool grid = ImGui::GetContentRegionAvail().x >= w::px(440);
+        const int columns = grid ? 4 : 2;
+        if (ImGui::BeginTable("current-fields", columns, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoSavedSettings)) {
+            for (int col = 0; col < columns; ++col)
+                ImGui::TableSetupColumn("##c", col % 2 ? ImGuiTableColumnFlags_WidthStretch : ImGuiTableColumnFlags_WidthFixed, col % 2 ? 1.f : w::px(grid ? 92 : 120));
+            int cell{};
+            const auto put = [&](const char* name, const std::function<void()>& value) {
+                if (cell % columns == 0) ImGui::TableNextRow();
+                ImGui::TableNextColumn(); w::colored(c.muted, name, false);
+                ImGui::TableNextColumn(); value();
+                cell += 2;
+            };
+            if (active->rssi) put(tr(Key::SignalLabel), [&] { w::signal_bars(c, *active->rssi); ImGui::SameLine(); ImGui::Text("%d dBm", *active->rssi); });
+            if (!band.empty()) put(tr(band_known ? Key::BandChannel : Key::ChannelLabel), [&] { text(band); });
+            put(tr(Key::Ipv4), [&] { text(active->address.empty() ? tr(Key::Unknown) : active->address); });
+            put(tr(Key::Gateway), [&] { text(active->gateway.empty() ? tr(Key::Unknown) : active->gateway); });
+            ImGui::EndTable();
+        }
+        w::caption(c, active->description.empty() ? active->name : active->description, false);
+        w::end_card();
+    }
+    void network_row(const Network& n, bool selected) {
+        const auto& c = colors();
+        const float row_h = ImGui::GetTextLineHeight() * 2 + w::px(space::md) * 2;
+        ImGui::PushID(n.key.c_str());
+        const auto origin = ImGui::GetCursorScreenPos();
+        const float width = ImGui::GetContentRegionAvail().x;
+        ImGui::PushStyleColor(ImGuiCol_Header, c.accent_soft);
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, selected ? c.accent_soft : c.raised);
+        ImGui::PushStyleColor(ImGuiCol_HeaderActive, c.accent_soft);
+        if (ImGui::Selectable("##network", selected, ImGuiSelectableFlags_AllowOverlap, {width, row_h})) {
+            selected_network = n.key;
+            start_bssid.clear(); start_interface.clear();
+        }
+        ImGui::PopStyleColor(3);
+        // Content drawn over the selectable.
+        const float pad = w::px(space::md);
+        ImGui::SetCursorScreenPos({origin.x + pad, origin.y + (row_h - ImGui::GetTextLineHeight()) * 0.5f});
+        w::signal_bars(c, n.best_rssi);
+        ImGui::SetCursorScreenPos({origin.x + pad + w::px(28), origin.y + pad - w::px(1)});
+        ImGui::PushStyleColor(ImGuiCol_Text, selected ? c.accent_text : c.text);
+        w::text(n.label);
+        ImGui::PopStyleColor();
+        ImGui::SetCursorScreenPos({origin.x + pad + w::px(28), origin.y + pad + ImGui::GetTextLineHeight() + w::px(2)});
+        std::string sub = tr(n.secured ? Key::Secured : Key::OpenNetwork);
+        for (unsigned bit = 1; bit <= 4; bit <<= 1) if (n.bands & bit) sub += std::string(" · ") + band_label(bit == 1 ? 2412 : bit == 2 ? 5180 : 5955);
+        sub += " · ";
+        sub += n.access_points == 1 ? std::string(tr(Key::OneAccessPoint)) : format(tr(Key::AccessPointsCount), static_cast<unsigned>(n.access_points));
+        w::caption(c, sub, false);
+        // Status badge, right aligned.
+        const auto badge_key = n.connected ? Key::Connected : n.saved ? Key::Saved : Key::NotSaved;
+        const auto badge_tone = n.connected ? c.success : n.saved ? Tone{c.accent_text, c.accent_soft} : c.neutral;
+        ImGui::PushFont(nullptr, w::body_size() * type::caption);
+        const float bw = ImGui::CalcTextSize(tr(badge_key)).x + w::px(16);
+        ImGui::PopFont();
+        ImGui::SetCursorScreenPos({origin.x + width - bw - pad, origin.y + (row_h - ImGui::GetTextLineHeight()) * 0.5f - w::px(1)});
+        w::badge(badge_tone, tr(badge_key));
+        // Re-submit the row extent so the layout grows by the row, not by the overlaid cursor moves.
+        ImGui::SetCursorScreenPos(origin);
+        ImGui::Dummy({width, row_h});
+        ImGui::PopID();
+    }
+    void networks_card(Worker& worker, const std::vector<Network>& networks, bool fresh) {
+        const auto& c = colors();
+        if (!w::begin_card(c, "networks")) { w::end_card(); return; }
+        const auto now = net::Clock::now();
+        w::heading(c, tr(Key::Networks));
+        if (view.scanning) w::caption(c, tr(Key::Scanning), false);
+        else if (view.scan_at != net::Clock::time_point{}) w::caption(c, age_text(view.scan_at, Key::ScanAgeSeconds, Key::ScanAgeMinutes), false);
+        else w::caption(c, tr(Key::ScanNever));
+        w::gap(space::sm);
+        const auto wait = std::chrono::duration_cast<std::chrono::seconds>(view.scan_ready - now).count();
+        ImGui::BeginDisabled(worker.busy() || wait > 0);
+        const auto scan_label = std::string(tr(view.scan_at == net::Clock::time_point{} ? Key::ScanNetworks : Key::Rescan)) + "###scan";
+        if (w::button(c, scan_label.c_str(), view.scan_at == net::Clock::time_point{} || !fresh ? w::Kind::primary : w::Kind::secondary)) worker.scan();
+        ImGui::EndDisabled();
+        if (wait > 0 && !worker.busy()) { ImGui::SameLine(); ImGui::AlignTextToFramePadding(); w::caption(c, format(tr(Key::AvailableIn), static_cast<int>(wait)), false); }
+        if (networks.size() > 6) {
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(std::max(w::px(120), ImGui::GetContentRegionAvail().x));
+            network_filter.Draw("##filter", 0);
+            if (!network_filter.IsActive()) {
+                const auto r = ImGui::GetItemRectMin();
+                ImGui::GetWindowDrawList()->AddText({r.x + ImGui::GetStyle().FramePadding.x, r.y + ImGui::GetStyle().FramePadding.y},
+                    ImGui::GetColorU32(c.muted), tr(Key::FilterNetworks));
+            }
+        }
+        errors(view.discovery.errors);
+        if (view.discovery.cached && !view.scanning) { w::gap(space::xs); w::banner(c.info, c, tr(Key::ScanCached)); }
+        w::gap(space::sm);
+        if (networks.empty() && view.scan_at != net::Clock::time_point{} && !view.scanning) w::caption(c, tr(Key::WifiEmpty));
+        unsigned shown{};
+        for (const auto& n : networks) {
+            if (network_filter.IsActive() && !network_filter.PassFilter(n.label.c_str())) continue;
+            network_row(n, n.key == selected_network);
+            ++shown;
+        }
+        if (!networks.empty() && !shown) w::caption(c, tr(Key::NoFilterMatch));
+        w::end_card();
+    }
+    void selection_card(Worker& worker, const Network& n, bool fresh) {
+        const auto& c = colors();
+        if (!w::begin_card(c, "selection")) { w::end_card(); return; }
+        w::caption(c, tr(Key::WifiNetwork), false);
+        w::title(c, n.label);
+        // Normal mode: the strongest saved row (Windows still picks the BSSID). Assisted: chosen start AP.
+        const net::Bss* normal_target{};
+        for (const auto m : n.members) if (!view.discovery.bss[m].profile.empty()) { normal_target = &view.discovery.bss[m]; break; }
+        std::vector<net::Bss> members;
+        for (const auto m : n.members) members.push_back(view.discovery.bss[m]);
+        const auto recommended = net::recommend_start(members);
+        const net::Bss* recommended_bss = recommended ? &view.discovery.bss[n.members[recommended->index]] : normal_target;
+        const net::Bss* assisted_target = recommended_bss;
+        for (const auto m : n.members) {
+            const auto& b = view.discovery.bss[m];
+            if (b.bssid == start_bssid && b.interface_id == start_interface && !b.profile.empty()) { assisted_target = &b; break; }
+        }
+        const auto* active = active_wifi();
+        const bool here = active && n.connected && normal_target && active->profile == normal_target->profile;
+        const auto ready_in = std::chrono::duration_cast<std::chrono::seconds>(view.wifi_ready - net::Clock::now()).count();
+        if (!n.saved) {
+            w::gap(space::sm);
+            w::banner(c.warning, c, tr(Key::NotSaved), tr(Key::NotSavedBody));
+            w::gap(space::sm);
+            if (w::button(c, tr(Key::WifiSettings), w::Kind::primary)) open_windows_wifi();
+        } else {
+            if (here) { w::gap(space::xs); w::badge(c.success, tr(Key::AlreadyHere)); }
+            if (!fresh) { w::gap(space::sm); w::banner(c.warning, c, tr(Key::ScanExpiredRefreshBeforeConnecting), tr(Key::StaleBody)); }
+            const bool can = fresh && !worker.busy() && ready_in <= 0 && normal_target;
+            w::gap(space::md);
+            // Option 1: normal.
+            w::heading(c, tr(Key::WifiNormal));
+            w::caption(c, tr(Key::NormalDesc));
+            ImGui::BeginDisabled(!can);
+            if (w::button(c, (std::string(tr(Key::WifiNormal)) + "###normal").c_str(), w::Kind::primary)) start_wifi(worker, *normal_target, net::WifiMode::normal);
+            ImGui::EndDisabled();
+            w::gap(space::md);
+            ImGui::Separator();
+            w::gap(space::sm);
+            // Option 2: assisted, with an explicit starting access point.
+            w::heading(c, tr(Key::WifiAssist));
+            w::caption(c, tr(Key::AssistDesc));
+            w::section(c, tr(Key::StartAccessPoint));
+            const bool many_adapters = std::count_if(view.hardware.interfaces.begin(), view.hardware.interfaces.end(), [](const auto& i) { return i.wireless; }) > 1;
+            if (ImGui::BeginTable("aps", many_adapters ? 4 : 3, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoSavedSettings | ImGuiTableFlags_RowBg)) {
+                unsigned rows{};
+                for (const auto m : n.members) {
+                    const auto& b = view.discovery.bss[m];
+                    if (b.profile.empty() || ++rows > 6) continue;
+                    ImGui::TableNextRow(); ImGui::TableNextColumn();
+                    ImGui::PushID(static_cast<int>(m));
+                    const bool chosen = assisted_target == &b;
+                    if (ImGui::RadioButton("##ap", chosen)) { start_bssid = b.bssid; start_interface = b.interface_id; }
+                    ImGui::SameLine(); ImGui::PushFont(nullptr, w::body_size() * 0.95f); text(b.bssid); ImGui::PopFont();
+                    if (&b == recommended_bss) { ImGui::SameLine(); w::badge({c.accent_text, c.accent_soft}, tr(Key::Recommended)); }
+                    ImGui::TableNextColumn(); w::signal_bars(c, b.rssi); ImGui::SameLine(); ImGui::TextColored(c.muted, "%d dBm", b.rssi);
+                    ImGui::TableNextColumn(); ImGui::TextColored(c.muted, "%s · %u", band_label(b.mhz).c_str(), b.channel);
+                    if (many_adapters) {
+                        ImGui::TableNextColumn();
+                        const auto adapter = std::find_if(view.hardware.interfaces.begin(), view.hardware.interfaces.end(), [&](const auto& i) { return i.id == b.interface_id; });
+                        ImGui::TextColored(c.muted, "%s", adapter != view.hardware.interfaces.end() ? adapter->name.c_str() : "");
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::EndTable();
+            }
+            if (recommended) w::caption(c, tr(recommended->reason == net::StartReason::wider_band ? Key::StartWiderBand : Key::StartStrongest));
+            w::gap(space::xs);
+            ImGui::BeginDisabled(!can || !assisted_target);
+            if (w::button(c, (std::string(tr(Key::WifiAssist)) + "###assist").c_str(), w::Kind::secondary)) start_wifi(worker, *assisted_target, net::WifiMode::assisted);
+            ImGui::EndDisabled();
+            if (ready_in > 0 && !worker.busy()) { ImGui::SameLine(); ImGui::AlignTextToFramePadding(); w::caption(c, format(tr(Key::AvailableIn), static_cast<int>(ready_in)), false); }
+        }
+        switch_dialog(worker);
+        w::end_card();
+    }
+    void switch_dialog(Worker& worker) {
+        const auto& c = colors();
+        const std::string title = std::string(tr(Key::SwitchTitle)) + "###wifi_switch";
+        const auto* vp = ImGui::GetMainViewport();
+        ImGui::SetNextWindowSizeConstraints({std::min(w::px(420), vp->WorkSize.x), 0}, {std::min(w::px(560), vp->WorkSize.x), vp->WorkSize.y});
+        if (ImGui::BeginPopupModal(title.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            if (wifi_confirmation) {
+                w::heading(c, net::display_ssid(wifi_confirmation->ssid));
+                w::caption(c, tr(wifi_mode == net::WifiMode::normal ? Key::WifiNormal : Key::WifiAssist));
+                w::gap(space::sm);
+                w::wrapped(tr(Key::SwitchBody));
+                w::gap(space::md);
+            }
+            ImGui::BeginDisabled(worker.busy() || !wifi_confirmation);
+            if (w::button(c, tr(Key::Continue), w::Kind::primary)) { worker.wifi(*wifi_confirmation, wifi_mode); wifi_confirmation.reset(); ImGui::CloseCurrentPopup(); }
+            ImGui::EndDisabled(); ImGui::SameLine();
+            if (w::button(c, tr(Key::Cancel)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) { wifi_confirmation.reset(); ImGui::CloseCurrentPopup(); }
+            ImGui::EndPopup();
         }
     }
+    void progress_card(Worker& worker) {
+        const auto& c = colors();
+        if (!view.wifi_progress) return;
+        const auto& p = *view.wifi_progress;
+        if (!w::begin_card(c, "progress")) { w::end_card(); return; }
+        w::heading(c, tr(view.wifi_mode == net::WifiMode::normal ? Key::ProgressNormal : Key::ProgressAssist));
+        if (p.attempts > 1 || (p.attempt > 0 && view.wifi_mode == net::WifiMode::assisted))
+            w::caption(c, format(tr(Key::ProgressAttempt), p.attempt, std::max(p.attempts, p.attempt), p.bssid.c_str()));
+        w::gap(space::md);
+        const std::array<const char*, 4> labels{tr(Key::StepPrepare), tr(Key::StepAssociate), tr(Key::StepAddress), tr(Key::StepInternet)};
+        const int at = p.stage == net::WifiStage::preparing ? 0 : p.stage == net::WifiStage::associating ? 1 :
+            p.stage == net::WifiStage::obtaining_address ? 2 : p.stage == net::WifiStage::checking_internet ? 3 : 1;
+        std::array<w::StepState, 4> states{};
+        for (int i = 0; i < 4; ++i) states[i] = i < at ? w::StepState::done : i == at ? w::StepState::active : w::StepState::pending;
+        w::stepper(c, labels, states);
+        const auto hint = p.stage == net::WifiStage::preparing ? Key::StagePrepareHint : p.stage == net::WifiStage::associating ? Key::StageAssociateHint :
+            p.stage == net::WifiStage::obtaining_address ? Key::StageAddressHint : p.stage == net::WifiStage::checking_internet ? Key::StageInternetHint : Key::StageRestoreHint;
+        w::caption(c, tr(hint));
+        w::gap(space::sm);
+        if (w::button(c, tr(Key::Cancel))) worker.stop();
+        w::end_card();
+    }
+    void result_card(Worker& worker, const net::WifiResult& r, const Network* network, bool fresh) {
+        const auto& c = colors();
+        if (!w::begin_card(c, "result")) { w::end_card(); return; }
+        const net::WifiAttempt* last = r.attempts.empty() ? nullptr : &r.attempts.back();
+        const auto cause = last && last->error ? last->error->wifi_failure : net::WifiFailure::unspecified;
+        switch (r.status) {
+        case net::WifiStatus::internet_reported: w::banner(c.success, c, tr(Key::ResultInternetTitle), tr(Key::ResultInternetBody)); break;
+        case net::WifiStatus::portal: w::banner(c.warning, c, tr(Key::ResultPortalTitle), tr(Key::ResultPortalBody)); break;
+        case net::WifiStatus::local_link: w::banner(c.warning, c, tr(Key::ResultLocalTitle), tr(Key::ResultLocalBody)); break;
+        case net::WifiStatus::ip_pending: w::banner(c.info, c, tr(Key::ResultPendingTitle), tr(Key::ResultPendingBody)); break;
+        case net::WifiStatus::failed: w::banner(c.danger, c, tr(Key::ResultFailedTitle), tr(failure_advice(cause))); break;
+        case net::WifiStatus::cancelled: w::banner(c.neutral, c, tr(Key::ResultCancelledTitle), tr(Key::WifiCancel)); break;
+        case net::WifiStatus::recovery_failed: w::banner(c.danger, c, tr(Key::ResultRecoveryTitle), tr(Key::WifiRecovery)); break;
+        case net::WifiStatus::request_unsettled: w::banner(c.danger, c, tr(Key::ResultUnsettledTitle), tr(Key::WifiUnsettled)); break;
+        case net::WifiStatus::invalid: w::banner(c.warning, c, tr(Key::ResultInvalidTitle), tr(Key::WifiCannotStart)); break;
+        }
+        if (r.restored) { w::gap(space::xs); w::caption(c, tr(Key::RestoredNote)); }
+        if (last && last->error && !last->error->os_message.empty()) {
+            w::gap(space::xs);
+            if (w::begin_fields("os", 150)) { w::field(c, tr(Key::WindowsMessage), last->error->os_message); w::end_fields(); }
+        }
+        w::gap(space::sm);
+        // Next actions.
+        bool first = true;
+        const auto action = [&](Key k, w::Kind kind) { if (!first) ImGui::SameLine(); first = false; return w::button(c, tr(k), kind); };
+        if (r.status == net::WifiStatus::portal || r.status == net::WifiStatus::local_link) { if (action(Key::OpenSignIn, w::Kind::primary)) open_sign_in(); }
+        if (r.status == net::WifiStatus::ip_pending || r.status == net::WifiStatus::local_link || r.status == net::WifiStatus::portal) {
+            ImGui::BeginDisabled(worker.busy());
+            if (action(Key::CheckAgain, w::Kind::secondary)) worker.inspect();
+            ImGui::EndDisabled();
+        }
+        if (r.status == net::WifiStatus::failed && view.wifi_mode == net::WifiMode::normal && net::retry_elsewhere(cause) && network && fresh && last) {
+            const auto ready_in = std::chrono::duration_cast<std::chrono::seconds>(view.wifi_ready - net::Clock::now()).count();
+            ImGui::BeginDisabled(worker.busy() || ready_in > 0);
+            if (action(Key::TryAssisted, w::Kind::primary)) start_wifi(worker, last->candidate, net::WifiMode::assisted);
+            ImGui::EndDisabled();
+        }
+        if (r.status == net::WifiStatus::failed || r.status == net::WifiStatus::recovery_failed || r.status == net::WifiStatus::request_unsettled) {
+            if (action(Key::WifiSettings, w::Kind::secondary)) open_windows_wifi();
+        }
+        if (wifi_settings_failed) w::caption(c, tr(Key::WifiSettingsFailed));
+        if (!r.attempts.empty() || r.elapsed.count()) {
+            w::gap(space::sm);
+            ImGui::PushStyleColor(ImGuiCol_Header, c.surface); ImGui::PushStyleColor(ImGuiCol_HeaderHovered, c.raised);
+            const bool open = ImGui::CollapsingHeader(tr(Key::Details));
+            ImGui::PopStyleColor(2);
+            if (open) {
+                if (w::begin_fields("summary", 190)) {
+                    w::field(c, tr(Key::DurationLabel), format("%.1f s", static_cast<double>(r.elapsed.count()) / 1000.));
+                    w::end_fields();
+                }
+                unsigned n{};
+                constexpr std::array reasons{Key::WifiReasonSelected, Key::WifiReasonIndependent, Key::WifiReasonSuccess, Key::WifiReasonFailure, Key::WifiReasonSignal};
+                for (const auto& a : r.attempts) {
+                    ImGui::PushID(static_cast<int>(n));
+                    w::section(c, format(tr(Key::AttemptNumber), ++n));
+                    if (w::begin_fields("attempt", 190)) {
+                        w::field(c, tr(Key::Bssid), a.candidate.bssid);
+                        w::field(c, tr(Key::AttemptReason), tr(reasons[static_cast<unsigned>(a.reason)]));
+                        if (a.timing.association) w::field(c, tr(Key::WifiAssociationTime), format("%lld ms", static_cast<long long>(a.timing.association->count())));
+                        if (a.timing.usable) w::field(c, tr(Key::WifiUsableTime), format("%lld ms", static_cast<long long>(a.timing.usable->count())));
+                        if (a.timing.internet_reported) w::field(c, tr(Key::WifiInternetTime), format("%lld ms", static_cast<long long>(a.timing.internet_reported->count())));
+                        w::field(c, tr(Key::CauseLabel), a.error ? tr(failure_key(a.error->wifi_failure)) : tr(Key::Succeeded));
+                        if (a.error && a.error->wlan_reason) w::field(c, tr(Key::ReasonCode), format("0x%05X", a.error->wlan_reason));
+                        if (a.error) w::field(c, message(a.error->operation), message(a.error->detail));
+                        w::end_fields();
+                    }
+                    ImGui::PopID();
+                }
+                w::caption(c, tr(Key::PathTimingSource));
+            }
+        }
+        w::end_card();
+    }
+    void connect_page(Worker& worker) {
+        const auto& c = colors();
+        page_header(Key::NavConnect, tr(Key::ConnectSubtitle));
+        const bool fresh = view.scan_at != net::Clock::time_point{} && net::Clock::now() - view.scan_at < net::wifi_scan_ttl;
+        const auto networks = group_networks(view);
+        const Network* chosen{};
+        for (const auto& n : networks) if (n.key == selected_network) chosen = &n;
+        const float avail = ImGui::GetContentRegionAvail().x;
+        const bool two_columns = avail >= w::px(860);
+        const float left_w = two_columns ? std::floor(avail * 0.56f) : avail;
+        const auto side = [&] {
+            current_connection_card(worker);
+            w::gap(space::md);
+            if (view.wifi_progress) { progress_card(worker); w::gap(space::md); }
+            else if (view.wifi) { result_card(worker, *view.wifi, chosen, fresh); w::gap(space::md); }
+            if (chosen) selection_card(worker, *chosen, fresh);
+            else if (!networks.empty()) { if (w::begin_card(c, "hint", 0, true)) w::caption(c, tr(Key::SelectNetworkHint)); w::end_card(); }
+        };
+        if (two_columns) {
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4{0, 0, 0, 0});
+            ImGui::BeginChild("connect-left", {left_w, 0}, ImGuiChildFlags_None);
+            ImGui::PopStyleColor();
+            networks_card(worker, networks, fresh);
+            ImGui::EndChild();
+            ImGui::SameLine(0, w::px(space::lg));
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4{0, 0, 0, 0});
+            ImGui::BeginChild("connect-right", {0, 0}, ImGuiChildFlags_None);
+            ImGui::PopStyleColor();
+            side();
+            ImGui::EndChild();
+        } else {
+            current_connection_card(worker);
+            w::gap(space::md);
+            if (view.wifi_progress) { progress_card(worker); w::gap(space::md); }
+            else if (view.wifi) { result_card(worker, *view.wifi, chosen, fresh); w::gap(space::md); }
+            networks_card(worker, networks, fresh);
+            w::gap(space::md);
+            if (chosen) selection_card(worker, *chosen, fresh);
+        }
+    }
+
     void about() {
-        paragraph(tr(Key::AboutIntro));
-        ImGui::SeparatorText(tr(Key::Modules));
-        constexpr std::array descriptions{Key::ModuleHardware, Key::ModuleRadio, Key::ModuleVirtual, Key::ModuleDiscovery, Key::ModuleExperiment,
-            Key::ModulePerformance, Key::ModuleIntelligence, Key::ModuleConnection, Key::ModuleDiagnostics};
-        for (std::size_t i = 0; i < descriptions.size(); ++i) {
-            ImGui::TextColored(palette(color_theme).key, "%s", tr(page_keys[i + 1]));
-            paragraph(tr(descriptions[i]));
+        const auto& c = colors();
+        if (w::begin_card(c, "about-intro")) { paragraph(tr(Key::AboutIntro)); }
+        w::end_card();
+        w::gap(space::md);
+        if (w::begin_card(c, "about-modules")) {
+            w::heading(c, tr(Key::Modules));
+            constexpr std::array<std::pair<Page, Key>, 9> modules{{{Page::hardware, Key::ModuleHardware}, {Page::radio, Key::ModuleRadio},
+                {Page::virtual_lab, Key::ModuleVirtual}, {Page::discovery, Key::ModuleDiscovery}, {Page::experiments, Key::ModuleExperiment},
+                {Page::performance, Key::ModulePerformance}, {Page::intelligence, Key::ModuleIntelligence}, {Page::trials, Key::ModuleConnection},
+                {Page::diagnostics, Key::ModuleDiagnostics}}};
+            for (const auto& [target, description] : modules) {
+                w::gap(space::xs);
+                ImGui::PushID(static_cast<int>(target));
+                if (w::button(c, tr(page_keys[static_cast<unsigned>(target)]), w::Kind::link)) page = target;
+                ImGui::PopID();
+                w::caption(c, tr(description));
+            }
+            w::gap(space::sm);
+            w::caption(c, tr(Key::SimulationVersusPhysical));
         }
-        ImGui::SeparatorText(tr(Key::QuickStart));
-        constexpr std::array order{0, 1, 2, 4, 3, 5, 6, 7, 9};
-        constexpr std::array descriptions_quick{Key::GuideOverview, Key::GuideHardware, Key::GuideRadio, Key::GuideDiscovery, Key::GuideVirtual,
-            Key::GuideExperiment, Key::GuidePerformance, Key::GuideIntelligence, Key::GuideDiagnostics};
-        for (std::size_t i = 0; i < order.size(); ++i) {
-            ImGui::PushID(static_cast<int>(i));
-            const auto label = std::to_string(i + 1) + ". " + tr(page_keys[order[i]]);
-            if (ImGui::SmallButton(label.c_str())) page = order[i];
-            paragraph(tr(descriptions_quick[i])); ImGui::PopID();
+        w::end_card();
+        w::gap(space::md);
+        if (w::begin_card(c, "about-build")) {
+            w::heading(c, tr(Key::BuildInformation));
+            if (w::begin_fields("build", 170)) {
+                w::field(c, tr(Key::Product), "CAMPUSLINK"); w::field(c, tr(Key::Version), build::version); w::field(c, tr(Key::Build), build::revision);
+                w::field(c, tr(Key::Architecture), build::architecture); w::field(c, tr(Key::Target), message(build::system));
+                w::field(c, tr(Key::Configuration), message(build::configuration));
+                w::field(c, tr(Key::Compiler), build::compiler);
+                const auto v = SDL_GetVersion();
+                w::field(c, "SDL3", std::to_string(SDL_VERSIONNUM_MAJOR(v)) + '.' + std::to_string(SDL_VERSIONNUM_MINOR(v)) + '.' + std::to_string(SDL_VERSIONNUM_MICRO(v)));
+                w::field(c, "Dear ImGui", ImGui::GetVersion());
+                w::end_fields();
+            }
+            w::gap(space::sm);
+            w::caption(c, tr(Key::Credits));
         }
-        paragraph(tr(Key::SimulationVersusPhysical));
-        ImGui::SeparatorText(tr(Key::BuildInformation));
-        field(tr(Key::Product), "CAMPUSLINK"); field(tr(Key::Version), build::version); field(tr(Key::Build), build::revision);
-        field(tr(Key::Architecture), build::architecture); field(tr(Key::Target), message(build::system));
-        field(tr(Key::Configuration), message(build::configuration));
-        field(tr(Key::Compiler), build::compiler);
-        const auto v = SDL_GetVersion();
-        field("SDL3", std::to_string(SDL_VERSIONNUM_MAJOR(v)) + '.' + std::to_string(SDL_VERSIONNUM_MINOR(v)) + '.' + std::to_string(SDL_VERSIONNUM_MICRO(v)));
-        field("Dear ImGui", ImGui::GetVersion());
-        ImGui::SeparatorText(tr(Key::References)); paragraph(tr(Key::Credits));
+        w::end_card();
     }
+
+    // ---- frame ------------------------------------------------------------------------------
     void draw(Worker& worker, const Display& display, Preferences& prefs, const Fonts& fonts) {
-        if (net::Clock::now() >= refresh) { worker.copy_if_changed(view, seen_revision); refresh = net::Clock::now() + 80ms; }
+        if (!fixture && net::Clock::now() >= refresh) { worker.copy_if_changed(view, seen_revision); refresh = net::Clock::now() + 80ms; }
+        const auto& tokens = colors();
         const auto* active = [&]() -> const net::Interface* {
             for (const auto& i : view.hardware.interfaces) if (i.associated) return &i;
             for (const auto& i : view.hardware.interfaces) if (i.wireless) return &i;
@@ -590,87 +1150,126 @@ struct Screen {
                 return seen.interface_id == b.interface_id && seen.bssid == b.bssid && seen.profile == b.profile;
             });
         };
-        const bool fresh_scan = view.scan_at != net::Clock::time_point{} && now - view.scan_at < 2min;
+        const bool fresh_scan = view.scan_at != net::Clock::time_point{} && now - view.scan_at < net::wifi_scan_ttl;
         const auto* vp = ImGui::GetMainViewport();
         ImGui::SetNextWindowPos(vp->WorkPos); ImGui::SetNextWindowSize(vp->WorkSize);
-        ImGui::Begin("CAMPUSLINK", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {w::px(space::lg), w::px(space::lg)});
+        ImGui::Begin("CAMPUSLINK", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus);
+        ImGui::PopStyleVar();
         const float dpi = ImGui::GetStyle().FontScaleDpi;
-        const auto& tokens = palette(color_theme);
-        const bool narrow = ImGui::GetContentRegionAvail().x < 950 * dpi;
-        ImGui::BeginChild("Toolbar", {0, ImGui::GetFrameHeightWithSpacing() + 14 * dpi}, ImGuiChildFlags_Borders);
-        ImGui::AlignTextToFramePadding(); ImGui::TextColored(tokens.key, "CAMPUSLINK");
-        if (!narrow) { ImGui::SameLine(); ImGui::TextDisabled("%s", tr(Key::WorkspaceTagline)); }
-        ImGui::SameLine(); language_control(prefs); ImGui::SameLine(); theme_control(prefs);
-        ImGui::SameLine(); ImGui::BeginDisabled(!worker.busy());
-        if (ImGui::Button(tr(Key::StopTask))) worker.stop();
-        ImGui::EndDisabled(); ImGui::EndChild();
+        top_bar(worker, prefs);
+        w::gap(space::sm);
+        const bool narrow = ImGui::GetContentRegionAvail().x < w::px(900);
         if (!narrow) {
-            ImGui::BeginChild("Navigation", {244 * dpi, 0}, ImGuiChildFlags_Borders);
-            ImGui::TextDisabled("%s", tr(Key::Workspace));
-            ImGui::Spacing();
-            for (unsigned i = 0; i < page_keys.size(); ++i) {
-                const auto label = std::string(tr(page_keys[i])) + "###nav" + std::to_string(i);
-                if (ImGui::Selectable(label.c_str(), page == static_cast<int>(i), 0, {0, ImGui::GetFrameHeight()})) page = static_cast<int>(i);
-            }
-            ImGui::Spacing(); ImGui::Separator();
-            ImGui::TextDisabled("v%s", build::version);
-            ImGui::EndChild(); ImGui::SameLine();
+            navigation(w::px(232));
+            ImGui::SameLine(0, w::px(space::lg));
         } else {
             ImGui::SetNextItemWidth(-1);
-            if (ImGui::BeginCombo("##navigation", tr(page_keys[page]))) {
-                for (unsigned i = 0; i < page_keys.size(); ++i)
-                    if (ImGui::Selectable(tr(page_keys[i]), page == static_cast<int>(i))) page = static_cast<int>(i);
+            if (ImGui::BeginCombo("##navigation", tr(page_keys[static_cast<unsigned>(page)]))) {
+                for (const auto& group : nav_groups) {
+                    ImGui::SeparatorText(tr(group.title));
+                    for (auto p = static_cast<unsigned>(group.first); p <= static_cast<unsigned>(group.last); ++p)
+                        if (ImGui::Selectable(tr(page_keys[p]), page == static_cast<Page>(p))) page = static_cast<Page>(p);
+                }
                 ImGui::EndCombo();
             }
+            w::gap(space::sm);
         }
-        ImGui::PushID(page);
-        ImGui::BeginChild("Panel", {0, 0}, ImGuiChildFlags_Borders);
-        ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 1.65f);
-        ImGui::PushStyleColor(ImGuiCol_Text, tokens.key);
-        paragraph(tr(page_keys[page]));
-        ImGui::PopStyleColor(); ImGui::PopFont();
-        if (page == 3) ImGui::TextDisabled("%s", tr(Key::SimulatedOfflineNoRadioClients));
-        if (worker.busy()) ImGui::TextColored(tokens.caution, "%s", tr(Key::WorkerActive));
-        paragraph(message(view.status));
-        if (unreadable_preferences) paragraph(tr(Key::PreferencesInvalid));
-        if (unsaved_preferences) paragraph(tr(Key::PreferencesWriteFailed));
-        ImGui::Separator(); ImGui::Spacing();
+        ImGui::PushID(static_cast<int>(page));
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, tokens.canvas);
+        ImGui::BeginChild("Panel", {0, 0}, ImGuiChildFlags_None);
+        ImGui::PopStyleColor();
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, tokens.surface);
+        if (fixture) { w::badge(tokens.neutral, tr(Key::CaptureFixture)); }
+        if (unreadable_preferences) w::banner(tokens.warning, tokens, tr(Key::PreferencesInvalid));
+        if (unsaved_preferences) w::banner(tokens.warning, tokens, tr(Key::PreferencesWriteFailed));
+        const auto lab_header = [&](Key title) {
+            page_header(title, tr(Key::LabNotice));
+            if (worker.busy()) w::caption(tokens, message(view.status));
+        };
         switch (page) {
-        case 0:
-            paragraph(tr(Key::WifiIntro));
-            ImGui::BeginDisabled(worker.busy());
-            if (ImGui::Button(tr(Key::WifiStart), {0, ImGui::GetFrameHeight() + 8 * dpi})) {
-                page = 4; selected_bss = -1; consent = false; batch.clear();
-                if (!fresh_scan) worker.scan();
+        case Page::connect: connect_page(worker); break;
+        case Page::diagnostics: {
+            page_header(Key::LogsDiagnostics);
+            if (w::begin_card(tokens, "env")) {
+                w::heading(tokens, tr(Key::EnvironmentCard));
+                if (w::begin_fields("env-fields", 200)) {
+                    w::field(tokens, tr(Key::Renderer), message(display.mode));
+                    w::field(tokens, tr(Key::ActiveWirelessInterface), active ? active->description : "");
+                    w::field(tokens, tr(Key::AssociatedSsid), active ? net::display_ssid(active->ssid) : "");
+                    w::field(tokens, tr(Key::InterfaceCount), std::to_string(view.hardware.interfaces.size()));
+                    w::field(tokens, tr(Key::DiscoveredBss), std::to_string(view.discovery.bss.size()));
+                    w::end_fields();
+                }
+                if (!display.warning.empty()) w::banner(tokens.warning, tokens, message(display.warning));
+                w::caption(tokens, message(view.status));
+                ImGui::BeginDisabled(worker.busy()); if (w::button(tokens, tr(Key::RefreshHardware))) worker.inspect(); ImGui::EndDisabled();
+                errors(view.hardware.errors);
             }
-            ImGui::EndDisabled();
-            if (view.wifi && ImGui::Button(tr(Key::WifiRecent))) page = 8;
-            ImGui::Spacing();
-            if (ImGui::CollapsingHeader(tr(Key::WifiLabSection)))
-                metric_cards(static_cast<unsigned>(view.hardware.interfaces.size()), static_cast<unsigned>(view.discovery.bss.size()), view.events);
-            if (ImGui::Button(tr(Key::QuickStart))) page = 11;
-            ImGui::Separator();
-            field(tr(Key::Renderer), message(display.mode)); if (!display.warning.empty()) paragraph(message(display.warning));
-            field(tr(Key::ActiveWirelessInterface), active ? active->description : "");
-            field(tr(Key::AssociatedSsid), active ? active->ssid : "");
-
-            ImGui::BeginDisabled(worker.busy()); if (ImGui::Button(tr(Key::RefreshHardware))) worker.inspect(); ImGui::EndDisabled();
-            if (view.hardware.interfaces.empty()) paragraph(tr(Key::WaitingForInventory));
-            errors(view.hardware.errors); break;
-        case 1:
-            ImGui::BeginDisabled(worker.busy()); if (ImGui::Button(tr(Key::RefreshHardware))) worker.inspect(); ImGui::EndDisabled();
+            w::end_card();
+            w::gap(space::md);
+            if (w::begin_card(tokens, "diagnosis")) {
+                w::heading(tokens, tr(Key::DiagnosisCard));
+                if (ImGui::BeginTable("diag", 3, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg | ImGuiTableFlags_NoSavedSettings)) {
+                    ImGui::TableSetupColumn("##step", ImGuiTableColumnFlags_WidthFixed, w::px(150));
+                    ImGui::TableSetupColumn("##status", ImGuiTableColumnFlags_WidthFixed, w::px(120));
+                    ImGui::TableSetupColumn("##detail", ImGuiTableColumnFlags_WidthStretch);
+                    for (const auto& d : net::diagnose(active, !view.discovery.bss.empty(), current ? &current->observation : nullptr)) {
+                        ImGui::TableNextRow(); ImGui::TableNextColumn();
+                        text(message(d.step));
+                        ImGui::TableNextColumn();
+                        const auto tone = d.status == "PASS" ? tokens.success : d.status == "WARN" ? tokens.warning :
+                            d.status == "UNAVAILABLE" ? tokens.danger : d.status == "INFERRED" ? tokens.info : tokens.neutral;
+                        w::badge(tone, message(d.status));
+                        ImGui::TableNextColumn(); paragraph(message(d.detail));
+                    }
+                    ImGui::EndTable();
+                }
+            }
+            w::end_card();
+            w::gap(space::md);
+            if (w::begin_card(tokens, "events")) {
+                w::heading(tokens, tr(Key::EventsCard));
+                ImGui::Checkbox(tr(Key::WarningsAndErrorsOnly), &warnings_only);
+                ImGui::SameLine();
+                ImGui::BeginDisabled(worker.busy()); if (w::button(tokens, tr(Key::ExportEventsTsv))) worker.export_logs(); ImGui::EndDisabled();
+                ImGui::PushFont(fonts.choose(Typeface::mono), ImGui::GetStyle().FontSizeBase * 0.92f);
+                for (auto it = view.logs.rbegin(); it != view.logs.rend(); ++it) {
+                    if (warnings_only && it->level == "INFO") continue;
+                    ImGui::TextColored(it->level == "INFO" ? tokens.muted : tokens.warning.strong, "%lld | %s | %s | %s | %u", it->when,
+                        message(it->level).c_str(), message(it->module).c_str(), message(it->event).c_str(), it->code);
+                }
+                ImGui::PopFont();
+            }
+            w::end_card();
+            break;
+        }
+        case Page::hardware:
+            lab_header(Key::HardwareLab);
+            ImGui::BeginDisabled(worker.busy()); if (w::button(tokens, tr(Key::RefreshHardware))) worker.inspect(); ImGui::EndDisabled();
             errors(view.hardware.errors);
+            w::gap(space::sm);
             for (const auto& i : view.hardware.interfaces) {
                 ImGui::PushID(i.id.c_str());
-                if (ImGui::CollapsingHeader(i.name.empty() ? i.description.c_str() : i.name.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
-                    field(tr(Key::Description), i.description); field(tr(Key::InterfaceId), i.id); field(tr(Key::AdapterClass), message(i.kind)); field(tr(Key::PnpHardwareId), i.hardware_id); field(tr(Key::Manufacturer), i.manufacturer);
-                    field(tr(Key::DriverProvider), i.provider); field(tr(Key::DriverVersion), i.driver); field(tr(Key::DriverDate), i.driver_date);
-                    field(tr(Key::Ipv4), i.address); field(tr(Key::Gateway), i.gateway); field(tr(Key::DnsConfiguration), i.dns);
-                    ImGui::Text(tr(Key::OperationalSAssociatedSDhcp), i.up ? tr(Key::Yes117) : tr(Key::No118), i.associated ? tr(Key::Yes117) : tr(Key::Unconfirmed), i.dhcp ? tr(Key::Reported) : tr(Key::NotReported));
+                if (w::begin_card(tokens, "iface")) {
+                    w::heading(tokens, i.name.empty() ? i.description : i.name);
+                    if (w::begin_fields("f", 190)) {
+                        w::field(tokens, tr(Key::Description), i.description); w::field(tokens, tr(Key::InterfaceId), i.id);
+                        w::field(tokens, tr(Key::AdapterClass), message(i.kind)); w::field(tokens, tr(Key::PnpHardwareId), i.hardware_id);
+                        w::field(tokens, tr(Key::Manufacturer), i.manufacturer); w::field(tokens, tr(Key::DriverProvider), i.provider);
+                        w::field(tokens, tr(Key::DriverVersion), i.driver); w::field(tokens, tr(Key::DriverDate), i.driver_date);
+                        w::field(tokens, tr(Key::Ipv4), i.address); w::field(tokens, tr(Key::Gateway), i.gateway); w::field(tokens, tr(Key::DnsConfiguration), i.dns);
+                        w::end_fields();
+                    }
+                    ImGui::TextColored(tokens.muted, tr(Key::OperationalSAssociatedSDhcp), i.up ? tr(Key::Yes117) : tr(Key::No118),
+                        i.associated ? tr(Key::Yes117) : tr(Key::Unconfirmed), i.dhcp ? tr(Key::Reported) : tr(Key::NotReported));
                 }
+                w::end_card(); w::gap(space::sm);
                 ImGui::PopID();
-            } break;
-        case 2: {
+            }
+            break;
+        case Page::radio: {
+            lab_header(Key::RadioCapabilities);
             std::set<std::string> physical, associated;
             std::set<unsigned> observed_bands;
             for (const auto& i : view.hardware.interfaces) {
@@ -679,113 +1278,139 @@ struct Screen {
                     physical.insert(i.device_instance);
                     if (i.associated) associated.insert(i.device_instance);
                 }
-                ImGui::SeparatorText(i.description.c_str()); field(tr(Key::PhyDriverReported), i.phy);
-                field(tr(Key::ActiveRoleOsReport), radio_roles(i.active_role)); field(tr(Key::DriverReportedRadioState), message(i.radio));
-                field(tr(Key::WlanInterfaceTypeReported), message(i.wlan_interface_type)); field(tr(Key::AssociatedPhyReported), i.current_phy);
-                field(tr(Key::Value80211dSupported), reported(i.dot11d_capable)); field(tr(Key::ManagementFrameProtection), reported(i.mfp_capable));
-                field(tr(Key::LegacyHostedNetworkCapability), reported(i.hosted_network_capable));
-                if (i.desired_bssids) ImGui::Text(tr(Key::DesiredBssidListLimitU), *i.desired_bssids);
-                if (i.channel && *i.channel) ImGui::Text(tr(Key::CurrentChannelDriverReportedU), *i.channel);
-                if (!i.documented_radio.empty()) paragraph(std::string(tr(Key::DocumentedModel)) + message(i.documented_radio));
-                field(tr(Key::ObservedAssociation), i.bssid);
-                if (i.secondary_sta_reported) {
-                    ImGui::Text(tr(Key::DualStaCount), i.secondary_sta.size());
-                    for (const auto& secondary : i.secondary_sta) {
-                        text(secondary.id); ImGui::SameLine(); ImGui::Text(tr(Key::DualStaState), secondary.state);
+                ImGui::PushID(i.id.c_str());
+                if (w::begin_card(tokens, "radio")) {
+                    w::heading(tokens, i.description);
+                    field(tr(Key::PhyDriverReported), i.phy);
+                    field(tr(Key::ActiveRoleOsReport), radio_roles(i.active_role)); field(tr(Key::DriverReportedRadioState), message(i.radio));
+                    field(tr(Key::WlanInterfaceTypeReported), message(i.wlan_interface_type)); field(tr(Key::AssociatedPhyReported), i.current_phy);
+                    field(tr(Key::Value80211dSupported), reported(i.dot11d_capable)); field(tr(Key::ManagementFrameProtection), reported(i.mfp_capable));
+                    field(tr(Key::LegacyHostedNetworkCapability), reported(i.hosted_network_capable));
+                    if (i.desired_bssids) ImGui::Text(tr(Key::DesiredBssidListLimitU), *i.desired_bssids);
+                    if (i.channel && *i.channel) ImGui::Text(tr(Key::CurrentChannelDriverReportedU), *i.channel);
+                    if (!i.documented_radio.empty()) paragraph(std::string(tr(Key::DocumentedModel)) + message(i.documented_radio));
+                    field(tr(Key::ObservedAssociation), i.bssid);
+                    if (i.secondary_sta_reported) {
+                        ImGui::Text(tr(Key::DualStaCount), i.secondary_sta.size());
+                        for (const auto& secondary : i.secondary_sta) {
+                            text(secondary.id); ImGui::SameLine(); ImGui::Text(tr(Key::DualStaState), secondary.state);
+                        }
                     }
+                    else if (i.secondary_sta_query) ImGui::Text(tr(Key::SecondaryStaUnknownNativeStatus), i.secondary_sta_query->code);
+                    field(tr(Key::DualStaSync), reported(i.secondary_synchronized));
+                    metric(tr(Key::Rssi), i.rssi ? std::optional<double>(*i.rssi) : std::nullopt, tr(Key::Dbm));
+                    ImGui::Text(tr(Key::LinkRatesReportedRx1f), i.rx_mbps, i.tx_mbps);
                 }
-                else if (i.secondary_sta_query) ImGui::Text(tr(Key::SecondaryStaUnknownNativeStatus), i.secondary_sta_query->code);
-                field(tr(Key::DualStaSync), reported(i.secondary_synchronized));
-                metric(tr(Key::Rssi), i.rssi ? std::optional<double>(*i.rssi) : std::nullopt, tr(Key::Dbm));
-                ImGui::Text(tr(Key::LinkRatesReportedRx1f), i.rx_mbps, i.tx_mbps);
+                w::end_card(); w::gap(space::sm);
+                ImGui::PopID();
             }
             for (const auto& b : view.discovery.bss) {
                 if (b.mhz >= 2400 && b.mhz <= 2500) observed_bands.insert(24);
                 if (b.mhz >= 4900 && b.mhz < 5925) observed_bands.insert(5);
                 if (b.mhz >= 5925 && b.mhz <= 7125) observed_bands.insert(6);
             }
-            for (const auto band : observed_bands) ImGui::Text(tr(Key::SGhzObservedInScan), band == 24 ? "2.4" : band == 5 ? "5" : "6");
-            ImGui::Text(tr(Key::IdentifiedPhysicalWlanDevicesZu), physical.size(), associated.size());
-            ImGui::TextColored(palette(color_theme).caution, "%s", tr(Key::PhysicalWirelessCapacityCeilingUnknown));
-            if (view.overlapping_validated_windows) ImGui::Text(tr(Key::VerifiedPairedExperimentWindowsU), view.overlapping_validated_windows);
-            else text(tr(Key::ConcurrentPhysicalTrialsNotVerified));
-            paragraph(tr(Key::AWindowsSnapshotIsNot));
-            paragraph(tr(Key::DualStaReadOnly));
+            if (w::begin_card(tokens, "radio-summary", 0, true)) {
+                for (const auto band : observed_bands) ImGui::Text(tr(Key::SGhzObservedInScan), band == 24 ? "2.4" : band == 5 ? "5" : "6");
+                ImGui::Text(tr(Key::IdentifiedPhysicalWlanDevicesZu), physical.size(), associated.size());
+                w::colored(tokens.warning.strong, tr(Key::PhysicalWirelessCapacityCeilingUnknown));
+                if (view.overlapping_validated_windows) ImGui::Text(tr(Key::VerifiedPairedExperimentWindowsU), view.overlapping_validated_windows);
+                else text(tr(Key::ConcurrentPhysicalTrialsNotVerified));
+                paragraph(tr(Key::AWindowsSnapshotIsNot));
+                paragraph(tr(Key::DualStaReadOnly));
+            }
+            w::end_card();
             break;
         }
-        case 3: {
-            ImGui::BeginDisabled(worker.busy());
-            number_input(tr(Key::LogicalClients), config.clients); number_input(tr(Key::LeaseSlots), config.pool); number_input(tr(Key::LeaseDurationSimulatedMs), config.lease_ms); number_input(tr(Key::Seed), config.seed);
-            if (ImGui::BeginCombo(tr(Key::Scenario), message(sim::name(config.scenario)).c_str())) {
-                for (unsigned x = 0; x < static_cast<unsigned>(sim::Scenario::count); ++x) {
-                    const auto option = static_cast<sim::Scenario>(x);
-                    if (ImGui::Selectable(message(sim::name(option)).c_str(), option == config.scenario)) config.scenario = option;
+        case Page::virtual_lab: {
+            lab_header(Key::VirtualClientLab);
+            w::colored(tokens.info.strong, tr(Key::SimulatedOfflineNoRadioClients));
+            w::gap(space::sm);
+            if (w::begin_card(tokens, "lab-config")) {
+                ImGui::BeginDisabled(worker.busy());
+                ImGui::PushItemWidth(std::min(w::px(260), ImGui::GetContentRegionAvail().x * 0.5f));
+                number_input(tr(Key::LogicalClients), config.clients); number_input(tr(Key::LeaseSlots), config.pool); number_input(tr(Key::LeaseDurationSimulatedMs), config.lease_ms); number_input(tr(Key::Seed), config.seed);
+                if (ImGui::BeginCombo(tr(Key::Scenario), message(sim::name(config.scenario)).c_str())) {
+                    for (unsigned x = 0; x < static_cast<unsigned>(sim::Scenario::count); ++x) {
+                        const auto option = static_cast<sim::Scenario>(x);
+                        if (ImGui::Selectable(message(sim::name(option)).c_str(), option == config.scenario)) config.scenario = option;
+                    }
+                    ImGui::EndCombo();
                 }
-                ImGui::EndCombo();
+                ImGui::PopItemWidth();
+                ImGui::Checkbox(tr(Key::RecordScenarioAndCsvHistory), &export_csv);
+                ImGui::BeginDisabled(!config.valid()); if (w::button(tokens, tr(Key::StartOfflineLab), w::Kind::primary)) { logical_selected = 0; logical_page = 1; worker.lab(config, false, export_csv); } ImGui::EndDisabled();
+                ImGui::SameLine(); if (w::button(tokens, tr(Key::ReplayLastSavedSeed))) { logical_selected = 0; logical_page = 1; worker.lab(config, true, export_csv); }
+                ImGui::SameLine(); if (w::button(tokens, tr(Key::ClearLogicalClients))) { logical_selected = 0; logical_page = 1; worker.clear_lab(); }
+                ImGui::EndDisabled();
+                ImGui::SameLine(); ImGui::BeginDisabled(!worker.busy() || !view.status.starts_with(english(Key::SimulatedVirtualLab)));
+                if (w::button(tokens, worker.paused() ? tr(Key::Resume) : tr(Key::Pause))) worker.pause();
+                ImGui::EndDisabled();
             }
-            ImGui::Checkbox(tr(Key::RecordScenarioAndCsvHistory), &export_csv);
-            ImGui::BeginDisabled(!config.valid()); if (ImGui::Button(tr(Key::StartOfflineLab))) { logical_selected = 0; logical_page = 1; worker.lab(config, false, export_csv); } ImGui::EndDisabled();
-            ImGui::SameLine(); if (ImGui::Button(tr(Key::ReplayLastSavedSeed))) { logical_selected = 0; logical_page = 1; worker.lab(config, true, export_csv); }
-            ImGui::SameLine(); if (ImGui::Button(tr(Key::ClearLogicalClients))) { logical_selected = 0; logical_page = 1; worker.clear_lab(); }
-            ImGui::EndDisabled();
-            ImGui::SameLine(); ImGui::BeginDisabled(!worker.busy() || !view.status.starts_with(english(Key::SimulatedVirtualLab)));
-            if (ImGui::Button(worker.paused() ? tr(Key::Resume) : tr(Key::Pause))) worker.pause();
-            ImGui::EndDisabled();
-            ImGui::Text(tr(Key::UClientsUTransitionsSimulated), view.client_count, view.events, view.simulated_ms);
-            for (unsigned j = 0; j < view.counts.size(); ++j) if (view.counts[j]) { ImGui::Text("%s: %u", message(sim::name(static_cast<sim::State>(j))).c_str(), view.counts[j]); }
-            const auto& clients = view.completed_clients ? *view.completed_clients : view.clients;
-            constexpr unsigned page_size = 120;
-            const auto pages_total = std::max(1u, (static_cast<unsigned>(clients.size()) + page_size - 1) / page_size);
-            if (pages_total > 1) { number_input(tr(Key::ClientPage), logical_page); ImGui::SameLine(); ImGui::Text("/ %u", pages_total); }
-            else if (worker.busy() && !view.clients.empty()) text(tr(Key::LivePreviewAllClientsAre));
-            logical_page = std::clamp(logical_page, 1u, pages_total);
-            if (logical_selected && logical_selected <= clients.size()) {
-                const auto& c = clients[logical_selected - 1];
-                ImGui::SeparatorText(tr(Key::SelectedLogicalClientHistory));
-                ImGui::Text(tr(Key::ClientUUDiscoverAttempts), c.id, c.discovers, c.leases);
-                for (unsigned i = 0; i < c.history_size; ++i) ImGui::Text("%6u ms  %s", c.history[i].at_ms, message(sim::name(c.history[i].state)).c_str());
-            }
-            if (ImGui::BeginTable("clients", 6, ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollX | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingFixedFit, {0, 295 * dpi})) {
-                for (const auto* h : {tr(Key::LogicalId), tr(Key::State), tr(Key::LeaseCount), tr(Key::LatencySimMs), tr(Key::LossSim), tr(Key::RssiSimDbm)}) ImGui::TableSetupColumn(h);
-                ImGui::TableHeadersRow();
-                const auto first = (logical_page - 1) * page_size;
-                for (auto i = first; i < std::min<std::size_t>(first + page_size, clients.size()); ++i) {
-                    const auto& c = clients[i];
-                    ImGui::TableNextRow(); ImGui::TableNextColumn();
-                    if (ImGui::Selectable(std::to_string(c.id).c_str(), logical_selected == c.id)) logical_selected = c.id;
-                    ImGui::TableNextColumn(); text(message(sim::name(c.state)));
-                    ImGui::TableNextColumn(); ImGui::Text("%u", c.leases); ImGui::TableNextColumn(); ImGui::Text("%.1f", c.metrics.latency_ms);
-                    ImGui::TableNextColumn(); ImGui::Text("%.1f", c.metrics.loss_percent); ImGui::TableNextColumn();
-                    if (c.metrics.rssi_dbm < 0) ImGui::Text("%.0f", c.metrics.rssi_dbm); else text(tr(Key::NA));
+            w::end_card();
+            w::gap(space::sm);
+            if (w::begin_card(tokens, "lab-results")) {
+                ImGui::Text(tr(Key::UClientsUTransitionsSimulated), view.client_count, view.events, view.simulated_ms);
+                for (unsigned j = 0; j < view.counts.size(); ++j) if (view.counts[j]) { ImGui::TextColored(tokens.muted, "%s: %u", message(sim::name(static_cast<sim::State>(j))).c_str(), view.counts[j]); }
+                const auto& clients = view.completed_clients ? *view.completed_clients : view.clients;
+                constexpr unsigned page_size = 120;
+                const auto pages_total = std::max(1u, (static_cast<unsigned>(clients.size()) + page_size - 1) / page_size);
+                if (pages_total > 1) { ImGui::SetNextItemWidth(w::px(140)); number_input(tr(Key::ClientPage), logical_page); ImGui::SameLine(); ImGui::Text("/ %u", pages_total); }
+                else if (worker.busy() && !view.clients.empty()) text(tr(Key::LivePreviewAllClientsAre));
+                logical_page = std::clamp(logical_page, 1u, pages_total);
+                if (logical_selected && logical_selected <= clients.size()) {
+                    const auto& cl = clients[logical_selected - 1];
+                    w::section(tokens, tr(Key::SelectedLogicalClientHistory));
+                    ImGui::Text(tr(Key::ClientUUDiscoverAttempts), cl.id, cl.discovers, cl.leases);
+                    for (unsigned i = 0; i < cl.history_size; ++i) ImGui::TextColored(tokens.muted, "%6u ms  %s", cl.history[i].at_ms, message(sim::name(cl.history[i].state)).c_str());
                 }
-                ImGui::EndTable();
+                if (ImGui::BeginTable("clients", 6, ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollX | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingFixedFit, {0, 295 * dpi})) {
+                    for (const auto* h : {tr(Key::LogicalId), tr(Key::State), tr(Key::LeaseCount), tr(Key::LatencySimMs), tr(Key::LossSim), tr(Key::RssiSimDbm)}) ImGui::TableSetupColumn(h);
+                    ImGui::TableSetupScrollFreeze(0, 1);
+                    ImGui::TableHeadersRow();
+                    const auto first = (logical_page - 1) * page_size;
+                    for (auto i = first; i < std::min<std::size_t>(first + page_size, clients.size()); ++i) {
+                        const auto& cl = clients[i];
+                        ImGui::TableNextRow(); ImGui::TableNextColumn();
+                        if (ImGui::Selectable(std::to_string(cl.id).c_str(), logical_selected == cl.id)) logical_selected = cl.id;
+                        ImGui::TableNextColumn(); text(message(sim::name(cl.state)));
+                        ImGui::TableNextColumn(); ImGui::Text("%u", cl.leases); ImGui::TableNextColumn(); ImGui::Text("%.1f", cl.metrics.latency_ms);
+                        ImGui::TableNextColumn(); ImGui::Text("%.1f", cl.metrics.loss_percent); ImGui::TableNextColumn();
+                        if (cl.metrics.rssi_dbm < 0) ImGui::Text("%.0f", cl.metrics.rssi_dbm); else text(tr(Key::NA));
+                    }
+                    ImGui::EndTable();
+                }
             }
+            w::end_card();
             break;
         }
-        case 4:
-            ImGui::BeginDisabled(worker.busy()); if (ImGui::Button(tr(Key::ScanWindowsWlan))) { selected_bss = -1; consent = false; batch.clear(); worker.scan(); } ImGui::EndDisabled();
-            paragraph(tr(Key::WifiGuidance));
+        case Page::discovery:
+            lab_header(Key::NetworkDiscovery);
+            ImGui::BeginDisabled(worker.busy()); if (w::button(tokens, tr(Key::ScanWindowsWlan), w::Kind::primary)) { selected_bss = -1; consent = false; batch.clear(); worker.scan(); } ImGui::EndDisabled();
 #ifdef _WIN32
-            if (ImGui::Button(tr(Key::WifiSettings))) open_windows_wifi();
+            ImGui::SameLine(); if (w::button(tokens, tr(Key::WifiSettings))) open_windows_wifi();
             if (wifi_settings_failed) paragraph(tr(Key::WifiSettingsFailed));
 #endif
+            w::caption(tokens, tr(Key::WifiGuidance));
             if (!worker.busy() && view.discovery.bss.empty()) paragraph(tr(Key::WifiEmpty));
-            if (!fresh_scan && !view.discovery.bss.empty()) ImGui::TextColored(palette(color_theme).caution, "%s", tr(Key::ScanExpiredRefreshBeforeConnecting));
+            if (!fresh_scan && !view.discovery.bss.empty()) w::colored(tokens.warning.strong, tr(Key::ScanExpiredRefreshBeforeConnecting));
             errors(view.discovery.errors);
+            ImGui::SetNextItemWidth(std::min(w::px(320), ImGui::GetContentRegionAvail().x));
             discovery_filter.Draw(tr(Key::FilterSsidBssidOrProfile));
-            if (ImGui::BeginTable("bss", 7, ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollX | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingFixedFit, {0, 295 * dpi})) {
+            if (ImGui::BeginTable("bss", 7, ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollX | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingFixedFit, {0, std::max(w::px(240), ImGui::GetContentRegionAvail().y - w::px(8))})) {
                 for (const auto* h : {tr(Key::Ssid), tr(Key::Bssid), tr(Key::Signal), tr(Key::MhzChannel), tr(Key::SecurityEvidence), tr(Key::WindowsProfile), tr(Key::ActiveWirelessInterface)}) ImGui::TableSetupColumn(h);
+                ImGui::TableSetupScrollFreeze(1, 1);
                 ImGui::TableHeadersRow();
                 std::vector<int> indices;
                 for (unsigned j = 0; j < view.discovery.bss.size(); ++j) {
                     const auto& row = view.discovery.bss[j];
-                    if (discovery_filter.PassFilter((row.ssid + " " + row.bssid + " " + row.profile).c_str())) indices.push_back(static_cast<int>(j));
+                    if (discovery_filter.PassFilter((net::display_ssid(row.ssid) + " " + row.bssid + " " + row.profile).c_str())) indices.push_back(static_cast<int>(j));
                 }
                 ImGuiListClipper clip; clip.Begin(static_cast<int>(indices.size()));
                 while (clip.Step()) for (auto row = clip.DisplayStart; row < clip.DisplayEnd; ++row) {
                     const auto j = indices[row]; const auto& b = view.discovery.bss[j];
                     ImGui::TableNextRow(); ImGui::TableNextColumn(); ImGui::PushID(j);
-                    if (ImGui::Selectable(b.ssid.empty() ? tr(Key::Hidden) : b.ssid.c_str(), selected_bss == j)) { selected_bss = j; consent = false; page = 8; }
+                    const auto label = b.ssid.empty() ? std::string(tr(Key::Hidden)) : net::display_ssid(b.ssid);
+                    if (ImGui::Selectable(label.c_str(), selected_bss == j)) { selected_bss = j; consent = false; page = Page::trials; }
                     ImGui::PopID(); ImGui::TableNextColumn(); text(b.bssid); ImGui::TableNextColumn(); ImGui::Text("%d dBm", b.rssi);
                     ImGui::TableNextColumn(); ImGui::Text("%u / %u", b.mhz, b.channel); ImGui::TableNextColumn(); text(message(b.security)); ImGui::TableNextColumn(); text(b.profile);
                     ImGui::TableNextColumn();
@@ -794,18 +1419,25 @@ struct Screen {
                 }
                 ImGui::EndTable();
             } break;
-        case 5:
-            paragraph(tr(Key::LoadTestScopeConfWith));
-            ImGui::BeginDisabled(worker.busy()); if (ImGui::Button(tr(Key::LoadTestScopeConf))) { consent = false; batch.clear(); worker.load_scope(); } ImGui::EndDisabled();
-            if (view.scopes.empty()) ImGui::TextColored(palette(color_theme).caution, "%s", tr(Key::NoActiveTestScope));
-            for (const auto& scope : view.scopes) {
-                ImGui::SeparatorText(scope.bssid.c_str()); field(tr(Key::WindowsProfile), scope.profile); field(tr(Key::Method), scope.method());
-                field(tr(Key::ControlledDnsName), scope.dns_name);
-                ImGui::Text(tr(Key::USBatchCooldownGateway), scope.cooldown_s, scope.require_gateway_reply ? tr(Key::Required) : tr(Key::Optional));
+        case Page::experiments:
+            lab_header(Key::ExperimentCenter);
+            if (w::begin_card(tokens, "scopes")) {
+                paragraph(tr(Key::LoadTestScopeConfWith));
+                ImGui::BeginDisabled(worker.busy()); if (w::button(tokens, tr(Key::LoadTestScopeConf), w::Kind::primary)) { consent = false; batch.clear(); worker.load_scope(); } ImGui::EndDisabled();
+                if (view.scopes.empty()) w::colored(tokens.warning.strong, tr(Key::NoActiveTestScope));
+                for (const auto& scope : view.scopes) {
+                    w::section(tokens, scope.bssid); field(tr(Key::WindowsProfile), scope.profile); field(tr(Key::Method), scope.method());
+                    field(tr(Key::ControlledDnsName), scope.dns_name);
+                    ImGui::Text(tr(Key::USBatchCooldownGateway), scope.cooldown_s, scope.require_gateway_reply ? tr(Key::Required) : tr(Key::Optional));
+                }
+                w::gap(space::sm);
+                if (w::button(tokens, tr(Key::OpenVirtualClientLab), w::Kind::link)) page = Page::virtual_lab;
             }
-            if (ImGui::Button(tr(Key::OpenVirtualClientLab))) page = 3;
+            w::end_card();
             break;
-        case 6:
+        case Page::performance:
+            lab_header(Key::PerformanceLab);
+            if (w::begin_card(tokens, "perf")) {
             if (latest) {
                 measurement_offset = std::clamp(measurement_offset, 0, static_cast<int>(view.candidates.size()) - 1);
                 ImGui::SliderInt(tr(Key::PriorObservations), &measurement_offset, 0, static_cast<int>(view.candidates.size()) - 1);
@@ -813,7 +1445,7 @@ struct Screen {
                 const auto& o = record.observation;
                 field(tr(Key::Scope), record.method); field(tr(Key::Bssid), record.bss.bssid);
                 field(tr(Key::HostValidation), record.host_validated ? tr(Key::Pass) : tr(Key::NotVerifiedNotEligibleFor));
-                ImGui::TextColored(o.sample_complete ? palette(color_theme).key : palette(color_theme).caution, tr(Key::SIcmpRepliesUU), o.sample_complete ? tr(Key::CompleteTransfers) : tr(Key::InsufficientSamples), o.replies, o.attempts, o.bytes);
+                ImGui::TextColored(o.sample_complete ? tokens.success.strong : tokens.warning.strong, tr(Key::SIcmpRepliesUU), o.sample_complete ? tr(Key::CompleteTransfers) : tr(Key::InsufficientSamples), o.replies, o.attempts, o.bytes);
                 metric(tr(Key::MeanRtt), o.latency_ms, tr(Key::Ms)); metric(tr(Key::MedianRtt), o.rtt_distribution.median, tr(Key::Ms)); metric(tr(Key::P95Rtt), o.rtt_distribution.p95, tr(Key::Ms));
                 metric(tr(Key::MeanAbsJitter), o.jitter_ms, tr(Key::Ms)); metric(tr(Key::IcmpMisses), o.loss_percent, "%"); metric(tr(Key::DnsMedian), o.dns_ms, tr(Key::Ms));
                 metric(tr(Key::GoodputRepeatability), o.repeatability, "%");
@@ -832,250 +1464,320 @@ struct Screen {
                     }
                     ImGui::EndTable();
                 }
-                paragraph(tr(Key::Clp1LabGoodputIncludesProtocol));
+                w::caption(tokens, tr(Key::Clp1LabGoodputIncludesProtocol));
                 if (o.error) errors({*o.error});
-            } else ImGui::TextColored(palette(color_theme).muted, "%s", tr(Key::NoAuthorizedEndpointObservationsYet));
-            break;
-        case 7: {
-            const std::array labels{tr(Key::Reachability), tr(Key::Downstream), tr(Key::Rtt), tr(Key::IcmpMisses), tr(Key::Jitter)};
-            for (unsigned x = 0; x < labels.size(); ++x) ImGui::InputDouble(labels[x], &weights[x], 1., 5., "%.0f");
-            auto ranked = view.candidates;
-            try { for (auto& c : ranked) c.rating = net::candidate_score(c, weights); }
-            catch (const std::invalid_argument& e) { paragraph(e.what()); break; }
-            for (const auto& c : net::rank(std::move(ranked), net::Clock::now())) {
-                ImGui::SeparatorText(c.bss.bssid.c_str());
-                paragraph(c.method);
-                ImGui::Text(tr(Key::Value1f1000fCoverageU), c.rating.points, c.rating.coverage * 100., c.rating.samples, c.rating.eligible ? tr(Key::Eligible) : tr(Key::LowConfidenceStale));
-                for (unsigned x = 0; x < labels.size(); ++x) metric(labels[x], c.rating.components[x], "/ 100");
+            } else w::caption(tokens, tr(Key::NoAuthorizedEndpointObservationsYet));
             }
-            paragraph(tr(Key::ScoringV2UsesMedianGoodput));
+            w::end_card();
+            break;
+        case Page::intelligence: {
+            lab_header(Key::IntelligenceEngine);
+            const std::array labels{tr(Key::Reachability), tr(Key::Downstream), tr(Key::Rtt), tr(Key::IcmpMisses), tr(Key::Jitter)};
+            if (w::begin_card(tokens, "weights")) {
+                ImGui::PushItemWidth(std::min(w::px(220), ImGui::GetContentRegionAvail().x * 0.5f));
+                for (unsigned x = 0; x < labels.size(); ++x) ImGui::InputDouble(labels[x], &weights[x], 1., 5., "%.0f");
+                ImGui::PopItemWidth();
+                w::caption(tokens, tr(Key::ScoringV2UsesMedianGoodput));
+            }
+            w::end_card();
+            auto ranked = view.candidates;
+            try { for (auto& cnd : ranked) cnd.rating = net::candidate_score(cnd, weights); }
+            catch (const std::invalid_argument& e) { w::banner(tokens.warning, tokens, e.what()); break; }
+            for (const auto& cnd : net::rank(std::move(ranked), net::Clock::now())) {
+                w::gap(space::sm);
+                ImGui::PushID(&cnd);
+                if (w::begin_card(tokens, "cand")) {
+                    w::heading(tokens, cnd.bss.bssid);
+                    w::caption(tokens, cnd.method);
+                    ImGui::Text(tr(Key::Value1f1000fCoverageU), cnd.rating.points, cnd.rating.coverage * 100., cnd.rating.samples, cnd.rating.eligible ? tr(Key::Eligible) : tr(Key::LowConfidenceStale));
+                    for (unsigned x = 0; x < labels.size(); ++x) metric(labels[x], cnd.rating.components[x], "/ 100");
+                }
+                w::end_card();
+                ImGui::PopID();
+            }
             break;
         }
-        case 8: {
-            field(tr(Key::WifiNetwork), chosen ? chosen->ssid : "");
-            paragraph(tr(Key::WifiModesHelp));
-            paragraph(tr(Key::WifiScopeIndependent));
-            const bool valid_wifi = chosen && chosen->infrastructure && !chosen->profile.empty() && !chosen->ssid.empty();
-            const auto request_wifi = [&](net::WifiMode mode) {
-                wifi_mode = mode; wifi_confirmation = *chosen;
-                ImGui::OpenPopup("###wifi_confirmation");
-            };
-            ImGui::BeginDisabled(worker.busy() || !fresh_scan || !valid_wifi);
-            if (ImGui::Button(tr(Key::WifiNormal))) request_wifi(net::WifiMode::normal);
-            if (ImGui::Button(tr(Key::WifiAssist))) request_wifi(net::WifiMode::assisted);
-            ImGui::EndDisabled();
-            if (!fresh_scan || !chosen) {
-                ImGui::BeginDisabled(worker.busy());
-                if (ImGui::Button(tr(Key::WifiStart))) page = 4;
+        case Page::trials: {
+            lab_header(Key::LabTrialsTitle);
+            if (w::begin_card(tokens, "trials")) {
+                field(tr(Key::WifiNetwork), chosen ? net::display_ssid(chosen->ssid) : "");
+                field(tr(Key::CurrentWindowsProfile), active ? active->profile : ""); field(tr(Key::SelectedBssid), chosen ? chosen->bssid : "");
+                field(tr(Key::SelectedWindowsProfile), chosen ? chosen->profile : "");
+                w::caption(tokens, tr(Key::WindowsObtainsItsOwnIp));
+                if (!chosen) {
+                    w::gap(space::xs);
+                    if (w::button(tokens, tr(Key::NetworkDiscovery), w::Kind::link)) page = Page::discovery;
+                }
+                w::gap(space::sm);
+                consent_box("##consent", tr(Key::IAuthorizeThisScopeAnd), &consent);
+                const auto* chosen_scope = chosen ? authorized(*chosen) : nullptr;
+                ImGui::BeginDisabled(worker.busy() || !consent || !fresh_scan || !chosen_scope);
+                if (w::button(tokens, tr(Key::ConnectAndValidateSelectedProfile), w::Kind::primary)) { request({{*chosen_scope, *chosen}}); }
                 ImGui::EndDisabled();
-            }
-            if (chosen && !valid_wifi) paragraph(tr(Key::WifiSavedRequired));
-#ifdef _WIN32
-            if (ImGui::Button(tr(Key::WifiSettings))) open_windows_wifi();
-            if (wifi_settings_failed) paragraph(tr(Key::WifiSettingsFailed));
-#endif
-            const std::string wifi_title = std::string(tr(Key::WifiConfirm)) + "###wifi_confirmation";
-            if (wifi_confirmation) ImGui::SetNextWindowSizeConstraints({std::min(450 * dpi, vp->WorkSize.x), 0}, {std::min(640 * dpi, vp->WorkSize.x), vp->WorkSize.y});
-            if (ImGui::BeginPopupModal(wifi_title.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-                if (wifi_confirmation) {
-                    field(tr(Key::WifiNetwork), wifi_confirmation->ssid);
-                    paragraph(tr(wifi_mode == net::WifiMode::normal ? Key::WifiNormal : Key::WifiAssist));
-                    paragraph(tr(Key::WifiConfirmDetail));
-                    if (wifi_mode == net::WifiMode::assisted) {
-                        paragraph(tr(Key::WifiAssistLimit)); paragraph(tr(Key::WifiSignalHint));
-                        ImGui::SliderInt(tr(Key::WifiBudget), &wifi_budget, 1, static_cast<int>(net::wifi_max_attempts), "%d", ImGuiSliderFlags_AlwaysClamp);
-                    }
+                ImGui::SameLine();
+                ImGui::BeginDisabled(worker.busy() || !fresh_scan || !chosen_scope || batch.size() >= 4 || (chosen && std::any_of(batch.begin(), batch.end(), [&](const auto& b) { return b.bssid == chosen->bssid && b.interface_id == chosen->interface_id; })));
+                if (w::button(tokens, tr(Key::QueueSelectedCandidate))) { batch.push_back(*chosen); consent = false; }
+                ImGui::EndDisabled();
+                std::vector<net::Experiment> planned;
+                if (batch.empty()) w::caption(tokens, tr(Key::NoQueuedCandidates));
+                for (const auto& b : batch) {
+                    if (auto* auth = authorized(b); auth && present(b)) planned.push_back({*auth, b});
+                    ImGui::BulletText(tr(Key::SOnS), b.bssid.c_str(), b.interface_id.c_str());
                 }
-                ImGui::BeginDisabled(!fresh_scan || worker.busy() || !wifi_confirmation);
-                if (ImGui::Button(tr(Key::Proceed))) {
-                    worker.wifi(*wifi_confirmation, wifi_mode, static_cast<unsigned>(wifi_budget)); wifi_confirmation.reset(); ImGui::CloseCurrentPopup();
-                }
+                ImGui::BeginDisabled(worker.busy() || batch.empty());
+                if (w::button(tokens, tr(Key::ClearQueue))) { batch.clear(); consent = false; }
                 ImGui::EndDisabled(); ImGui::SameLine();
-                if (ImGui::Button(tr(Key::Dismiss))) { wifi_confirmation.reset(); ImGui::CloseCurrentPopup(); }
-                ImGui::EndPopup();
-            }
-            if (view.wifi) wifi_result(*view.wifi);
-            if (!view.wifi_history.empty()) {
-                ImGui::Text(tr(Key::WifiHistoryCount), view.wifi_history.size());
-                paragraph(tr(Key::WifiHistoryInfo));
-                ImGui::BeginDisabled(worker.busy());
-                if (ImGui::Button(tr(Key::WifiHistoryClear))) worker.clear_wifi_history();
+                ImGui::BeginDisabled(worker.busy() || !consent || !fresh_scan || planned.empty() || planned.size() != batch.size());
+                if (w::button(tokens, tr(Key::RunAuthorizedQueue))) { request(std::move(planned), true); }
                 ImGui::EndDisabled();
+                std::optional<net::Candidate> recommended;
+                if (current && fresh_scan && authorized(current->bss) && authorized(current->bss)->method() == current->method) {
+                    auto baseline = *current;
+                    auto measured = view.candidates;
+                    try {
+                        baseline.rating = net::candidate_score(baseline, weights);
+                        for (auto& cnd : measured) cnd.rating = net::candidate_score(cnd, weights);
+                        for (const auto& cnd : net::rank(std::move(measured), now)) {
+                            const auto* scope = authorized(cnd.bss);
+                            if (scope && scope->method() == cnd.method && present(cnd.bss) &&
+                                net::should_switch(baseline, cnd, now, view.last_handoff)) { recommended = cnd; break; }
+                        }
+                    } catch (const std::invalid_argument&) { paragraph(tr(Key::WeightsAreInvalidAssistedSelection)); }
+                }
+                ImGui::BeginDisabled(worker.busy() || !consent || !recommended);
+                if (w::button(tokens, tr(Key::ApplyBestMeasuredImprovement))) { request({{*authorized(recommended->bss), recommended->bss}}); }
+                ImGui::EndDisabled();
+                w::caption(tokens, tr(Key::SingleRadioExperimentsAreSerialized));
+                if (!view.wifi_history.empty()) {
+                    w::gap(space::sm);
+                    ImGui::Text(tr(Key::WifiHistoryCount), view.wifi_history.size());
+                    w::caption(tokens, tr(Key::WifiHistoryInfo));
+                    ImGui::BeginDisabled(worker.busy());
+                    if (w::button(tokens, tr(Key::WifiHistoryClear))) worker.clear_wifi_history();
+                    ImGui::EndDisabled();
+                }
             }
-            if (!ImGui::CollapsingHeader(tr(Key::WifiLabSection))) break;
-            field(tr(Key::CurrentWindowsProfile), active ? active->profile : ""); field(tr(Key::SelectedBssid), chosen ? chosen->bssid : "");
-            field(tr(Key::SelectedWindowsProfile), chosen ? chosen->profile : "");
-            paragraph(tr(Key::WindowsObtainsItsOwnIp));
-            ImGui::Checkbox(tr(Key::IAuthorizeThisScopeAnd), &consent);
-            const auto* chosen_scope = chosen ? authorized(*chosen) : nullptr;
-            ImGui::BeginDisabled(worker.busy() || !consent || !fresh_scan || !chosen_scope);
-            if (ImGui::Button(tr(Key::ConnectAndValidateSelectedProfile))) { request({{*chosen_scope, *chosen}}); }
-            ImGui::EndDisabled();
-            ImGui::BeginDisabled(worker.busy() || !fresh_scan || !chosen_scope || batch.size() >= 4 || (chosen && std::any_of(batch.begin(), batch.end(), [&](const auto& b) { return b.bssid == chosen->bssid && b.interface_id == chosen->interface_id; })));
-            if (ImGui::Button(tr(Key::QueueSelectedCandidate))) { batch.push_back(*chosen); consent = false; }
-            ImGui::EndDisabled();
-            std::vector<net::Experiment> planned;
-            if (batch.empty()) ImGui::TextDisabled("%s", tr(Key::NoQueuedCandidates));
-            for (const auto& b : batch) {
-                if (auto* auth = authorized(b); auth && present(b)) planned.push_back({*auth, b});
-                ImGui::BulletText(tr(Key::SOnS), b.bssid.c_str(), b.interface_id.c_str());
-            }
-            ImGui::BeginDisabled(worker.busy() || batch.empty());
-            if (ImGui::Button(tr(Key::ClearQueue))) { batch.clear(); consent = false; }
-            ImGui::EndDisabled(); ImGui::SameLine();
-            ImGui::BeginDisabled(worker.busy() || !consent || !fresh_scan || planned.empty() || planned.size() != batch.size());
-            if (ImGui::Button(tr(Key::RunAuthorizedQueue))) { request(std::move(planned), true); }
-            ImGui::EndDisabled();
-            std::optional<net::Candidate> recommended;
-            if (current && fresh_scan && authorized(current->bss) && authorized(current->bss)->method() == current->method) {
-                auto baseline = *current;
-                auto measured = view.candidates;
-                try {
-                    baseline.rating = net::candidate_score(baseline, weights);
-                    for (auto& c : measured) c.rating = net::candidate_score(c, weights);
-                    for (const auto& c : net::rank(std::move(measured), now)) {
-                        const auto* scope = authorized(c.bss);
-                        if (scope && scope->method() == c.method && present(c.bss) &&
-                            net::should_switch(baseline, c, now, view.last_handoff)) { recommended = c; break; }
-                    }
-                } catch (const std::invalid_argument&) { paragraph(tr(Key::WeightsAreInvalidAssistedSelection)); }
-            }
-            ImGui::BeginDisabled(worker.busy() || !consent || !recommended);
-            if (ImGui::Button(tr(Key::ApplyBestMeasuredImprovement))) { request({{*authorized(recommended->bss), recommended->bss}}); }
-            ImGui::EndDisabled();
-            paragraph(tr(Key::SingleRadioExperimentsAreSerialized));
+            w::end_card();
             const std::string modal_title = std::string(tr(Key::ConfirmExperiment)) + "###physical_confirmation";
             ImGui::SetNextWindowSizeConstraints({std::min(450 * dpi, vp->WorkSize.x), 0}, {std::min(640 * dpi, vp->WorkSize.x), vp->WorkSize.y});
             if (ImGui::BeginPopupModal(modal_title.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
                 paragraph(tr(Key::DetailPhysicalTrial));
                 for (const auto& trial : confirmation) field(tr(Key::SelectedBssid), trial.candidate.bssid);
                 ImGui::BeginDisabled(!fresh_scan || worker.busy() || confirmation.empty());
-                if (ImGui::Button(tr(Key::Proceed))) {
+                if (w::button(tokens, tr(Key::Proceed), w::Kind::primary)) {
                     worker.experiments(std::move(confirmation));
                     if (confirmation_queue) batch.clear();
                     ImGui::CloseCurrentPopup();
                 }
                 ImGui::EndDisabled(); ImGui::SameLine();
-                if (ImGui::Button(tr(Key::Dismiss))) { confirmation.clear(); ImGui::CloseCurrentPopup(); }
+                if (w::button(tokens, tr(Key::Dismiss))) { confirmation.clear(); ImGui::CloseCurrentPopup(); }
                 ImGui::EndPopup();
             }
             for (const auto& outcome : view.outcomes) {
+                w::gap(space::xs);
                 field(outcome.bssid.c_str(), message(outcome.status));
                 if (!outcome.detail.empty()) paragraph(message(outcome.detail));
             }
             break;
         }
-        case 9:
-            for (const auto& d : net::diagnose(active, !view.discovery.bss.empty(), current ? &current->observation : nullptr)) {
-                ImGui::Text("%-17s %s", message(d.step).c_str(), message(d.status).c_str()); paragraph(message(d.detail));
+        case Page::settings: {
+            page_header(Key::Settings);
+            if (w::begin_card(tokens, "appearance")) {
+                w::heading(tokens, tr(Key::AppearanceCard));
+                if (w::begin_fields("prefs", 190)) {
+                    ImGui::TableNextRow(); ImGui::TableNextColumn(); ImGui::AlignTextToFramePadding(); w::colored(tokens.muted, tr(Key::Language), false);
+                    ImGui::TableNextColumn(); ImGui::PushID("settings"); language_control(prefs); ImGui::PopID();
+                    ImGui::TableNextRow(); ImGui::TableNextColumn(); ImGui::AlignTextToFramePadding(); w::colored(tokens.muted, tr(Key::Theme), false);
+                    ImGui::TableNextColumn(); theme_control(prefs);
+                    ImGui::TableNextRow(); ImGui::TableNextColumn(); ImGui::AlignTextToFramePadding(); w::colored(tokens.muted, tr(Key::Typeface), false);
+                    ImGui::TableNextColumn();
+                    {
+                        const std::array faces{"Inter", "JetBrains Mono", tr(Key::FallbackFont)};
+                        ImGui::SetNextItemWidth(w::px(220));
+                        if (ImGui::BeginCombo("##typeface", faces[static_cast<unsigned>(prefs.font)])) {
+                            for (unsigned i = 0; i < faces.size(); ++i)
+                                if (ImGui::Selectable(faces[i], i == static_cast<unsigned>(prefs.font))) prefs.font = static_cast<Typeface>(i);
+                            ImGui::EndCombo();
+                        }
+                    }
+                    ImGui::TableNextRow(); ImGui::TableNextColumn(); ImGui::AlignTextToFramePadding(); w::colored(tokens.muted, tr(Key::FontSize), false);
+                    ImGui::TableNextColumn(); ImGui::SetNextItemWidth(w::px(220)); ImGui::SliderInt("##size", &prefs.size, 13, 24, "%d px", ImGuiSliderFlags_AlwaysClamp);
+                    ImGui::TableNextRow(); ImGui::TableNextColumn(); ImGui::AlignTextToFramePadding(); w::colored(tokens.muted, tr(Key::CompactMode), false);
+                    ImGui::TableNextColumn(); ImGui::Checkbox("##compact", &prefs.compact);
+                    w::end_fields();
+                }
+                w::gap(space::sm);
+                if (w::button(tokens, tr(Key::RestoreDisplay))) {
+                    prefs = {};
+                    reset_display = true;
+                }
+                if (!fonts.inter || !fonts.mono) w::banner(tokens.warning, tokens, tr(Key::FontUnavailable));
+                w::section(tokens, tr(Key::TypographyPreview));
+                ImGui::PushFont(fonts.choose(prefs.font), static_cast<float>(prefs.size)); paragraph(tr(Key::PreviewText)); ImGui::PopFont();
+                w::gap(space::sm);
+                w::caption(tokens, std::string(tr(Key::UserDataDirectory)) + " : " + worker.folder().string());
             }
-            ImGui::SeparatorText(tr(Key::RecentWorkerEvents)); ImGui::Checkbox(tr(Key::WarningsAndErrorsOnly), &warnings_only);
-            ImGui::BeginDisabled(worker.busy()); if (ImGui::Button(tr(Key::ExportEventsTsv))) worker.export_logs(); ImGui::EndDisabled();
-            ImGui::PushFont(fonts.choose(Typeface::mono), ImGui::GetStyle().FontSizeBase);
-            for (auto it = view.logs.rbegin(); it != view.logs.rend(); ++it) {
-                if (warnings_only && it->level == "INFO") continue;
-                ImGui::Text("%lld | %s | %s | %s | %u", it->when, message(it->level).c_str(), message(it->module).c_str(), message(it->event).c_str(), it->code);
+            w::end_card();
+            w::gap(space::md);
+            if (w::begin_card(tokens, "capacity")) {
+                w::heading(tokens, tr(Key::SimulationCard));
+                w::caption(tokens, tr(Key::LogicalSimulationCapacityNotRadio));
+                ImGui::PushItemWidth(std::min(w::px(220), ImGui::GetContentRegionAvail().x * 0.5f));
+                number_input(tr(Key::MaximumLogicalClients), budget.max_clients); number_input(tr(Key::RssGrowthBudgetMib), budget.memory_mib);
+                number_input(tr(Key::WallTimeBudgetMs), budget.wall_ms); number_input(tr(Key::ProcessCpuBudgetMs), budget.cpu_ms);
+                ImGui::PopItemWidth();
+                ImGui::BeginDisabled(worker.busy()); if (w::button(tokens, tr(Key::MeasureLocalSimulationCapacity))) worker.profile(budget); ImGui::EndDisabled();
+                if (view.capacity) {
+                    ImGui::Text(tr(Key::StopSLargestCompletedConfiguration), message(sim::name(view.capacity->end)).c_str(), view.capacity->completed_clients());
+                    ImGui::PushFont(fonts.choose(Typeface::mono), ImGui::GetStyle().FontSizeBase * 0.9f);
+                    for (const auto& s : view.capacity->samples) ImGui::Text(tr(Key::Value6u7uEvents2fMs),
+                        s.clients, s.events, s.elapsed_ms, s.cpu_ms, s.p95_us, s.sampled_peak_rss / 1048576., s.sampled_growth / 1048576., s.within_budget ? tr(Key::WithinBudget) : tr(Key::Stopped));
+                    ImGui::PopFont();
+                }
             }
-            ImGui::PopFont(); break;
-        case 10:
-            ImGui::SeparatorText(tr(Key::DisplayPreferences));
-            ImGui::TextUnformatted(tr(Key::Language)); ImGui::SameLine(); ImGui::PushID("settings"); language_control(prefs); ImGui::PopID();
-            ImGui::TextUnformatted(tr(Key::Theme)); ImGui::SameLine(); theme_control(prefs);
-            {
-                const std::array faces{"Inter", "JetBrains Mono", tr(Key::FallbackFont)};
-                if (ImGui::BeginCombo(tr(Key::Typeface), faces[static_cast<unsigned>(prefs.font)])) {
-                    for (unsigned i = 0; i < faces.size(); ++i)
-                        if (ImGui::Selectable(faces[i], i == static_cast<unsigned>(prefs.font))) prefs.font = static_cast<Typeface>(i);
+            w::end_card();
+            break;
+        }
+        case Page::about: page_header(Key::About); about(); break;
+        case Page::paths: {
+            lab_header(Key::PathSpace);
+            if (w::begin_card(tokens, "path-measure")) {
+                w::banner(tokens.info, tokens, tr(Key::PathNotDeployed));
+                w::gap(space::xs);
+                w::caption(tokens, tr(Key::PathScopeHelp));
+                consent_box("##path-consent", tr(Key::PathConsent), &path_consent);
+                if (view.path_error) errors({*view.path_error});
+                w::section(tokens, tr(Key::PathInventory));
+                ImGui::BeginDisabled(worker.busy());
+                if (w::button(tokens, tr(Key::RefreshHardware))) worker.inspect();
+                ImGui::EndDisabled();
+                for (const auto& i : view.hardware.interfaces) {
+                    if (!i.hardware_interface && !i.wireless) continue;
+                    w::gap(space::xs);
+                    w::heading(tokens, i.name.empty() ? i.id : i.name);
+                    if (w::begin_fields(("pf" + i.id).c_str(), 170)) {
+                        w::field(tokens, tr(Key::InterfaceId), i.id);
+                        w::field(tokens, tr(Key::Ipv4), i.address.empty() ? tr(Key::Unknown) : i.address);
+                        w::field(tokens, tr(Key::Gateway), i.gateway.empty() ? tr(Key::Unknown) : i.gateway);
+                        if (i.wireless) w::field(tokens, tr(Key::AssociatedSsid), i.ssid.empty() ? tr(Key::Unknown) : net::display_ssid(i.ssid));
+                        w::end_fields();
+                    }
+                    const net::Bss active_path{i.id, i.ssid, i.bssid, {}, i.profile};
+                    if (const auto* scope = i.associated ? authorized(active_path) : nullptr) {
+                        ImGui::PushID(i.id.c_str());
+                        field(tr(Key::Method), scope->method());
+                        ImGui::BeginDisabled(!path_consent || worker.busy());
+                        if (w::button(tokens, tr(Key::PathMeasure), w::Kind::primary)) { path_consent = false; worker.measure_path(i.id, *scope); }
+                        ImGui::EndDisabled(); ImGui::PopID();
+                    }
+                }
+            }
+            w::end_card();
+            if (!view.paths.empty()) {
+                w::gap(space::md);
+                if (w::begin_card(tokens, "path-results")) {
+                    w::heading(tokens, tr(Key::PathMeasurements));
+                    for (auto it = view.paths.rbegin(); it != view.paths.rend(); ++it) {
+                        const auto& record = *it;
+                        w::section(tokens, record.bss.interface_id);
+                        w::caption(tokens, record.method);
+                        ImGui::Text(tr(Key::PathAge), static_cast<long long>(std::chrono::duration_cast<std::chrono::seconds>(now - record.observed).count()));
+                        field(tr(Key::HostValidation), record.host_validated ? tr(Key::Pass) : tr(Key::Unconfirmed));
+                        metric(tr(Key::MedianRtt), record.observation.rtt_distribution.median, tr(Key::Ms));
+                        metric(tr(Key::P95Rtt), record.observation.rtt_distribution.p95, tr(Key::Ms));
+                        metric(tr(Key::MeanAbsJitter), record.observation.jitter_ms, tr(Key::Ms));
+                        metric(tr(Key::IcmpMisses), record.observation.loss_percent, "%");
+                        metric(tr(Key::DownMedian), record.observation.down_mbps, "Mbit/s");
+                    }
+                }
+                w::end_card();
+            }
+            w::gap(space::md);
+            if (w::begin_card(tokens, "path-sim")) {
+                w::heading(tokens, tr(Key::PathSimulated));
+                constexpr std::array scenarios{Key::PathScenarioClean, Key::PathScenarioShared, Key::PathScenarioLoss};
+                ImGui::BeginDisabled(worker.busy());
+                ImGui::SetNextItemWidth(std::min(w::px(360), ImGui::GetContentRegionAvail().x));
+                if (ImGui::BeginCombo("##path-scenario", tr(scenarios[static_cast<unsigned>(path_scenario)]))) {
+                    for (unsigned n = 0; n < scenarios.size(); ++n)
+                        if (ImGui::Selectable(tr(scenarios[n]), path_scenario == static_cast<int>(n))) path_scenario = static_cast<int>(n);
                     ImGui::EndCombo();
                 }
-            }
-            ImGui::SliderInt(tr(Key::FontSize), &prefs.size, 13, 24, "%d px", ImGuiSliderFlags_AlwaysClamp);
-            ImGui::Checkbox(tr(Key::CompactMode), &prefs.compact);
-            if (ImGui::Button(tr(Key::RestoreDisplay))) {
-                prefs = {};
-                reset_display = true;
-            }
-            if (!fonts.inter || !fonts.mono) paragraph(tr(Key::FontUnavailable));
-            ImGui::SeparatorText(tr(Key::TypographyPreview));
-            ImGui::PushFont(fonts.choose(prefs.font), static_cast<float>(prefs.size)); paragraph(tr(Key::PreviewText)); ImGui::PopFont();
-            ImGui::Separator();
-            field(tr(Key::UserDataDirectory), worker.folder().string());
-            number_input(tr(Key::MaximumLogicalClients), budget.max_clients); number_input(tr(Key::RssGrowthBudgetMib), budget.memory_mib);
-            number_input(tr(Key::WallTimeBudgetMs), budget.wall_ms); number_input(tr(Key::ProcessCpuBudgetMs), budget.cpu_ms);
-            ImGui::BeginDisabled(worker.busy()); if (ImGui::Button(tr(Key::MeasureLocalSimulationCapacity))) worker.profile(budget); ImGui::EndDisabled();
-            ImGui::SeparatorText(tr(Key::LogicalSimulationCapacityNotRadio));
-            if (view.capacity) {
-                ImGui::Text(tr(Key::StopSLargestCompletedConfiguration), message(sim::name(view.capacity->end)).c_str(), view.capacity->completed_clients());
-                for (const auto& s : view.capacity->samples) ImGui::Text(tr(Key::Value6u7uEvents2fMs),
-                    s.clients, s.events, s.elapsed_ms, s.cpu_ms, s.p95_us, s.sampled_peak_rss / 1048576., s.sampled_growth / 1048576., s.within_budget ? tr(Key::WithinBudget) : tr(Key::Stopped));
-            }
-            break;
-        case 11: about(); break;
-        case 12: {
-            paragraph(tr(Key::PathNotDeployed));
-            paragraph(tr(Key::PathScopeHelp));
-            ImGui::Checkbox(tr(Key::PathConsent), &path_consent);
-            if (view.path_error) errors({*view.path_error});
-            ImGui::SeparatorText(tr(Key::PathInventory));
-            ImGui::BeginDisabled(worker.busy());
-            if (ImGui::Button(tr(Key::RefreshHardware))) worker.inspect();
-            ImGui::EndDisabled();
-            for (const auto& i : view.hardware.interfaces) {
-                if (!i.hardware_interface && !i.wireless) continue;
-                ImGui::SeparatorText(i.name.empty() ? i.id.c_str() : i.name.c_str());
-                field(tr(Key::InterfaceId), i.id);
-                field(tr(Key::Ipv4), i.address);
-                field(tr(Key::Gateway), i.gateway);
-                if (i.wireless) field(tr(Key::AssociatedSsid), i.ssid);
-                const net::Bss active_path{i.id, i.ssid, i.bssid, {}, i.profile};
-                if (const auto* scope = i.associated ? authorized(active_path) : nullptr) {
-                    ImGui::PushID(i.id.c_str());
-                    field(tr(Key::Method), scope->method());
-                    ImGui::BeginDisabled(!path_consent || worker.busy());
-                    if (ImGui::Button(tr(Key::PathMeasure))) { path_consent = false; worker.measure_path(i.id, *scope); }
-                    ImGui::EndDisabled(); ImGui::PopID();
+                ImGui::SameLine();
+                if (w::button(tokens, tr(Key::PathLabRun), w::Kind::primary)) worker.run_path_lab(path_scenario);
+                ImGui::EndDisabled();
+                if (view.path_lab) {
+                    w::caption(tokens, tr(scenarios[static_cast<unsigned>(view.path_lab_scenario)]));
+                    constexpr std::array names{Key::PathSingle, Key::PathRoundRobin, Key::PathEarliest};
+                    for (std::size_t i = 0; i < names.size(); ++i) {
+                        const auto& r = (*view.path_lab)[i];
+                        w::section(tokens, tr(names[i]));
+                        ImGui::Text(tr(Key::PathSimResult), r.mbps, r.elapsed_ms, r.completed, 128u, r.retries, r.reordered);
+                        ImGui::Text(tr(Key::PathSimDistribution), r.delivered[0], r.delivered[1], r.peak_buffer);
+                    }
                 }
             }
-            if (!view.paths.empty() && ImGui::CollapsingHeader(tr(Key::PathMeasurements))) {
-                for (auto it = view.paths.rbegin(); it != view.paths.rend(); ++it) {
-                    const auto& record = *it;
-                    ImGui::SeparatorText(record.bss.interface_id.c_str());
-                    paragraph(record.method);
-                    ImGui::Text(tr(Key::PathAge), static_cast<long long>(std::chrono::duration_cast<std::chrono::seconds>(now - record.observed).count()));
-                    field(tr(Key::HostValidation), record.host_validated ? tr(Key::Pass) : tr(Key::Unconfirmed));
-                    metric(tr(Key::MedianRtt), record.observation.rtt_distribution.median, tr(Key::Ms));
-                    metric(tr(Key::P95Rtt), record.observation.rtt_distribution.p95, tr(Key::Ms));
-                    metric(tr(Key::MeanAbsJitter), record.observation.jitter_ms, tr(Key::Ms));
-                    metric(tr(Key::IcmpMisses), record.observation.loss_percent, "%");
-                    metric(tr(Key::DownMedian), record.observation.down_mbps, "Mbit/s");
-                }
-            }
-            ImGui::SeparatorText(tr(Key::PathSimulated));
-            constexpr std::array scenarios{Key::PathScenarioClean, Key::PathScenarioShared, Key::PathScenarioLoss};
-            ImGui::BeginDisabled(worker.busy());
-            if (ImGui::BeginCombo("##path-scenario", tr(scenarios[static_cast<unsigned>(path_scenario)]))) {
-                for (unsigned n = 0; n < scenarios.size(); ++n)
-                    if (ImGui::Selectable(tr(scenarios[n]), path_scenario == static_cast<int>(n))) path_scenario = static_cast<int>(n);
-                ImGui::EndCombo();
-            }
-            if (ImGui::Button(tr(Key::PathLabRun))) worker.run_path_lab(path_scenario);
-            ImGui::EndDisabled();
-            if (view.path_lab) {
-                paragraph(tr(scenarios[static_cast<unsigned>(view.path_lab_scenario)]));
-                constexpr std::array names{Key::PathSingle, Key::PathRoundRobin, Key::PathEarliest};
-                for (std::size_t i = 0; i < names.size(); ++i) {
-                    const auto& r = (*view.path_lab)[i];
-                    ImGui::SeparatorText(tr(names[i]));
-                    ImGui::Text(tr(Key::PathSimResult), r.mbps, r.elapsed_ms, r.completed, 128u, r.retries, r.reordered);
-                    ImGui::Text(tr(Key::PathSimDistribution), r.delivered[0], r.delivered[1], r.peak_buffer);
-                }
-            }
+            w::end_card();
             break;
         }
+        case Page::count: break;
         }
+        ImGui::PopStyleColor();
         ImGui::EndChild(); ImGui::PopID(); ImGui::End();
     }
 };
+
+// Deterministic sample data so that smoke captures can show every connection state.
+// Used only by --ui-smoke; the pages say so with a visible badge.
+View fixture_view(int state) {
+    View v;
+    const auto now = net::Clock::now();
+    net::Interface wifi; wifi.id = "{fixture-wifi}"; wifi.name = "Wi-Fi"; wifi.description = "Intel(R) Wi-Fi 6 AX201 160MHz";
+    wifi.wireless = wifi.hardware_interface = wifi.up = true; wifi.device_instance = "PCI\\FIXTURE";
+    if (state != 0) {
+        wifi.associated = true; wifi.ssid = "Campus"; wifi.profile = "Campus"; wifi.bssid = "02:00:00:00:00:a1";
+        wifi.address = "192.0.2.211"; wifi.gateway = "192.0.2.1"; wifi.rssi = -61; wifi.channel = 44;
+    } else wifi.wlan_idle = true;
+    v.hardware.interfaces = {wifi};
+    v.inspected_at = now - 4s;
+    v.reach = {{wifi.id, state == 4 ? net::Reachability::portal : net::Reachability::internet}};
+    if (state != 0) {
+        const auto add = [&](std::string ssid, std::string bssid, int rssi, unsigned mhz, unsigned ch, bool secured, std::string profile) {
+            v.discovery.bss.push_back({wifi.id, std::move(ssid), std::move(bssid), secured ? "Privacy bit set (suite unverified)" : "No privacy bit",
+                std::move(profile), rssi, mhz, ch});
+        };
+        add("Campus", "02:00:00:00:00:a1", -61, 5220, 44, true, "Campus");
+        add("Campus", "02:00:00:00:00:a2", -67, 5500, 100, true, "Campus");
+        add("Campus", "02:00:00:00:00:a3", -74, 2437, 6, true, "Campus");
+        add("Biblioth\\xc3\\xa8que", "02:00:00:00:00:b1", -58, 5180, 36, true, "Biblioth\xC3\xA8que");
+        add("Caf\\xc3\\xa9 \\xc3\\x89tudiant", "02:00:00:00:00:c1", -70, 2462, 11, false, "");
+        add("Lab-Recherche", "02:00:00:00:00:d1", -82, 5745, 149, true, "");
+        add("", "02:00:00:00:00:e1", -88, 2412, 1, true, "");
+        v.scan_at = now - 25s;
+    }
+    if (state == 2) v.wifi_progress = net::WifiProgress{net::WifiStage::obtaining_address, 1, 3, "02:00:00:00:00:a1"}, v.wifi_mode = net::WifiMode::assisted;
+    if (state >= 3) {
+        net::WifiResult r;
+        net::WifiAttempt a{v.discovery.bss[0], {}, {}, net::WifiReason::selected};
+        a.timing.association = 1840ms; a.timing.usable = 6420ms;
+        r.link = wifi; r.elapsed = 9100ms;
+        switch (state) {
+        case 3: r.status = net::WifiStatus::internet_reported; a.timing.internet_reported = 8900ms; r.evidence = net::Reachability::internet; break;
+        case 4: r.status = net::WifiStatus::portal; r.evidence = net::Reachability::portal; break;
+        case 5: {
+            r.status = net::WifiStatus::failed; r.link.reset(); r.restored = true;
+            a.error = net::Error{"WlanConnect", 0x48002, "Windows reported that the connection did not complete", false,
+                net::WifiFailure::authentication, 0x48002, "La clé réseau est incorrecte."};
+            break;
+        }
+        default: r.status = net::WifiStatus::ip_pending; a.timing.usable.reset(); break;
+        }
+        r.attempts.push_back(std::move(a));
+        v.wifi = std::move(r);
+        v.wifi_mode = state == 5 ? net::WifiMode::normal : net::WifiMode::assisted;
+    }
+    return v;
+}
 }
 int run(bool smoke, bool graphics) {
     if (SDL_GetVersion() != SDL_VERSION) { SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "SDL runtime/header mismatch"); return 1; }
@@ -1106,29 +1808,66 @@ int run(bool smoke, bool graphics) {
     Screen screen;
     screen.unreadable_preferences = loaded.invalid;
     if (!smoke) worker.inspect();
-    constexpr auto panels = static_cast<unsigned>(page_keys.size());
-    constexpr auto total_frames = 4 * panels;
+    // Smoke: every page, then the connection page in each sample state (empty, list+selection,
+    // progress, Internet, portal, failure, address pending), for four language/theme/size/DPI sets.
+    constexpr auto panels = page_count;
+    // CAMPUSLINK_CAPTURE_LIVE adds one connection page rendered from a real, read-only inventory and
+    // scan of this machine (field evidence; never committed because it shows nearby networks).
+    const bool live = smoke && !graphics && SDL_getenv("CAMPUSLINK_CAPTURE_LIVE");
+    std::optional<View> live_view;
+    if (live) {
+        View v;
+        v.hardware = net::platform().inspect({});
+        v.discovery = net::platform().scan({});
+        v.reach = reachability(v.hardware);
+        v.scan_at = v.inspected_at = net::Clock::now();
+        live_view = std::move(v);
+    }
+    const unsigned fixtures = 7 + (live ? 1u : 0u);
+    const auto per_test = panels + fixtures;
+    constexpr unsigned repeats = 3; // auto-sized cards settle after the first frame of new content
+    const auto total_frames = 4 * per_test * repeats;
     constexpr std::array target_sizes{ImVec2{1360, 840}, ImVec2{1000, 700}, ImVec2{1440, 900}, ImVec2{820, 600}};
     constexpr std::array dpi_tests{1.f, 1.25f, 1.5f, 2.f};
     constexpr std::array capture_codes{"fr-light", "fr-dark", "en-light", "en-dark"};
     unsigned frames{};
-    std::array<double, total_frames> frame_ms{};
+    std::vector<double> frame_ms(total_frames);
     bool running = true;
     auto previous = prefs;
     const auto* capture_dir = smoke && !graphics ? SDL_getenv("CAMPUSLINK_CAPTURE_DIR") : nullptr;
+    // Idle pacing: render while something changes, otherwise wait for input with a short timeout
+    // so worker results and relative times still refresh. Never spin while minimized.
+    unsigned settle_frames = 3;
     while (running) {
         const auto frame_start = smoke ? net::Clock::now() : net::Clock::time_point{};
         SDL_Event event{};
+        if (!smoke) {
+            const auto flags = SDL_GetWindowFlags(window.get());
+            const bool hidden = flags & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_HIDDEN | SDL_WINDOW_OCCLUDED);
+            const bool animate = worker.busy() || settle_frames > 0;
+            if (hidden || !animate) {
+                if (SDL_WaitEventTimeout(&event, hidden ? 500 : 250)) {
+                    ImGui_ImplSDL3_ProcessEvent(&event);
+                    if (event.type == SDL_EVENT_QUIT || (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && event.window.windowID == SDL_GetWindowID(window.get()))) running = false;
+                    settle_frames = 3;
+                }
+                if (hidden && running) continue;
+            }
+        }
         while (SDL_PollEvent(&event)) {
             ImGui_ImplSDL3_ProcessEvent(&event);
+            settle_frames = 3;
             if (event.type == SDL_EVENT_QUIT || (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && event.window.windowID == SDL_GetWindowID(window.get()))) running = false;
         }
         if (!running) break;
-        const auto test = frames / panels;
+        const auto test = frames / (per_test * repeats);
+        const auto step = frames / repeats;
+        const bool last_repeat = frames % repeats == repeats - 1;
         float dpi = std::clamp(SDL_GetWindowDisplayScale(window.get()), 1.f, 3.f);
+        int fixture_state = -1;
         if (smoke) {
             if (test >= dpi_tests.size()) return 1;
-            if (frames % panels == 0) {
+            if (frames % (per_test * repeats) == 0) {
                 const auto size = target_sizes[test];
                 if (!SDL_SetWindowSize(window.get(), static_cast<int>(size.x), static_cast<int>(size.y))) return 1;
             }
@@ -1138,7 +1877,19 @@ int run(bool smoke, bool graphics) {
             prefs.size = test == 0 ? 16 : test == 1 ? 18 : test == 2 ? 15 : 13;
             prefs.compact = test >= 2;
             if (!graphics) dpi = dpi_tests[test]; // injected scale, not a Windows monitor observation
-            screen.page = static_cast<int>(frames % panels);
+            const auto index = step % per_test;
+            if (index < panels) { screen.page = static_cast<Page>(index); screen.fixture = false; screen.view = View{}; screen.seen_revision = 0; }
+            else {
+                fixture_state = static_cast<int>(index - panels);
+                screen.page = Page::connect;
+                if (fixture_state == 7 && live_view) {
+                    screen.fixture = false; screen.view = *live_view; screen.selected_network.clear();
+                    for (const auto& n : group_networks(screen.view)) if (n.saved) { screen.selected_network = n.key; break; }
+                } else {
+                    screen.fixture = true; screen.view = fixture_view(fixture_state);
+                    screen.selected_network = fixture_state == 0 ? std::string{} : "Campus\nPrivacy bit set (suite unverified)";
+                }
+            }
         } else {
             int width{}, height{};
             if (SDL_GetWindowSize(window.get(), &width, &height)) {
@@ -1154,7 +1905,7 @@ int run(bool smoke, bool graphics) {
         if (smoke && frames == 0) {
             for (const auto face : {fonts.inter, fonts.mono, fonts.fallback}) {
                 auto* baked = face->GetFontBaked(16);
-                for (const auto code : {0x00e9, 0x00e0, 0x00e7, 0x0153, 0x2019})
+                for (const auto code : {0x00e9, 0x00e0, 0x00e7, 0x0153, 0x2019, 0x00b7, 0x2026})
                     if (!baked->FindGlyphNoFallback(static_cast<ImWchar>(code))) {
                         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Missing French glyph U+%04x", static_cast<unsigned>(code)); return 1;
                     }
@@ -1163,13 +1914,14 @@ int run(bool smoke, bool graphics) {
         screen.draw(worker, display, prefs, fonts);
         ImGui::PopFont();
         std::string screenshot;
-        if (capture_dir && (screen.page == 0 || screen.page == 3 || screen.page == 10 || screen.page == 11 || screen.page == 12))
-            screenshot = std::string(capture_dir) + '/' + capture_codes[test] + '-' + std::to_string(screen.page) + ".bmp";
+        if (capture_dir && last_repeat) screenshot = std::string(capture_dir) + '/' + capture_codes[test] + '-' +
+            (fixture_state == 7 ? std::string("connect-live") : fixture_state >= 0 ? "connect-" + std::to_string(fixture_state) : "page-" + std::to_string(static_cast<unsigned>(screen.page))) + ".bmp";
         if (!display.draw(screenshot.empty() ? nullptr : screenshot.c_str())) {
             if (smoke || !display.gpu) { SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Rendering failed: %s", SDL_GetError()); return 1; }
             display.shutdown(); display.warning = english(Key::VulkanRenderingFailedUsingSdl);
             if (!display.setup(true)) return 1;
         }
+        if (settle_frames) --settle_frames;
         if (!smoke && (screen.reset_display || prefs != previous)) {
             if (screen.reset_display) {
                 SDL_SetWindowSize(window.get(), prefs.width, prefs.height);
@@ -1178,12 +1930,13 @@ int run(bool smoke, bool graphics) {
             screen.unsaved_preferences = !save_preferences(pref_path, prefs);
             if (!screen.unsaved_preferences) screen.unreadable_preferences = false;
             previous = prefs;
+            settle_frames = 3;
         }
         if (smoke) {
             frame_ms[frames++] = std::chrono::duration<double, std::milli>(net::Clock::now() - frame_start).count();
             if (frames == total_frames) { SDL_Event close{}; close.type = SDL_EVENT_QUIT; if (!SDL_PushEvent(&close)) return 1; }
         }
-        if (!display.gpu && !smoke) SDL_Delay(16);
+        if (!display.gpu && !smoke && (worker.busy() || settle_frames)) SDL_Delay(16);
     }
     worker.stop();
     if (smoke) {

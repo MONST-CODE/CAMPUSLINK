@@ -366,6 +366,21 @@ std::string display_ssid(std::string_view escaped) {
     }
     return out;
 }
+std::optional<StartChoice> recommend_start(std::span<const Bss> candidates) {
+    constexpr int wide_band_bonus = 6, wide_band_floor = -72;
+    const auto score = [](const Bss& b) { return b.rssi + (b.mhz >= 4900 && b.rssi >= wide_band_floor ? wide_band_bonus : 0); };
+    std::optional<std::size_t> best, strongest;
+    for (std::size_t i = 0; i < candidates.size(); ++i) {
+        const auto& b = candidates[i];
+        if (b.profile.empty() || !b.infrastructure || !bssid_format(b.bssid)) continue;
+        if (!strongest || b.rssi > candidates[*strongest].rssi) strongest = i;
+        if (!best || score(b) > score(candidates[*best]) ||
+            (score(b) == score(candidates[*best]) && std::tie(b.interface_id, b.bssid) < std::tie(candidates[*best].interface_id, candidates[*best].bssid)))
+            best = i;
+    }
+    if (!best) return std::nullopt;
+    return StartChoice{*best, candidates[*best].rssi < candidates[*strongest].rssi ? StartReason::wider_band : StartReason::strongest};
+}
 std::vector<Bss> wifi_plan(const Bss& selected, const Discovery& scan, const Snapshot& topology, WifiMode mode, WifiPolicy policy, Clock::time_point now) {
     if (!fresh_wifi(policy, now) || selected.profile.empty() || selected.ssid.empty() || !bssid_format(selected.bssid) ||
         !std::any_of(scan.bss.begin(), scan.bss.end(), [&](const auto& b) { return same_bss(selected, b); })) return {};
@@ -387,6 +402,9 @@ std::vector<Bss> wifi_plan(const Bss& selected, const Discovery& scan, const Sna
     std::sort(alternatives.begin(), alternatives.end(), [](const Choice& a, const Choice& b) {
         if (a.history != b.history) return a.history > b.history;
         if (a.independent != b.independent) return a.independent;
+        // Same explainable preference as recommend_start: reported signal, with a bounded band bonus.
+        const auto rank_signal = [](const Bss& x) { return x.rssi + (x.mhz >= 4900 && x.rssi >= -72 ? 6 : 0); };
+        if (rank_signal(*a.b) != rank_signal(*b.b)) return rank_signal(*a.b) > rank_signal(*b.b);
         if (a.b->rssi != b.b->rssi) return a.b->rssi > b.b->rssi;
         return std::tie(a.b->interface_id, a.b->bssid) < std::tie(b.b->interface_id, b.b->bssid);
     });

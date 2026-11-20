@@ -416,7 +416,8 @@ public:
         Wlan wlan;
         const auto list = interfaces(wlan, out.errors);
         if (!list) return out;
-        const auto scan_deadline = Clock::now() + 12s;
+        // A full 2.4/5/6 GHz scan in a dense environment regularly exceeds 5 s on Intel AX2xx.
+        const auto scan_deadline = Clock::now() + 15s;
         for (DWORD i = 0; i < list->dwNumberOfItems && !stop.stop_requested(); ++i) {
             if (Clock::now() >= scan_deadline) { out.errors.push_back(fail("Discovery total budget", ERROR_TIMEOUT)); break; }
             const auto& info = list->InterfaceInfo[i];
@@ -425,7 +426,7 @@ public:
             if (registered) { out.errors.push_back(fail("WlanRegisterNotification", registered)); continue; }
             const auto result = WlanScan(wlan.value, &info.InterfaceGuid, nullptr, nullptr, nullptr);
             if (!result) {
-                const auto end = std::min(Clock::now() + 5s, scan_deadline);
+                const auto end = std::min(Clock::now() + 8s, scan_deadline);
                 while (!notice.result.load(std::memory_order_acquire) && Clock::now() < end && !stop.stop_requested()) std::this_thread::sleep_for(40ms);
             }
             const auto unregistered = WlanRegisterNotification(wlan.value, WLAN_NOTIFICATION_SOURCE_NONE, TRUE, nullptr, nullptr, nullptr, nullptr);
@@ -435,10 +436,9 @@ public:
                 break;
             }
             if (stop.stop_requested()) break;
-            if (result) { out.errors.push_back(fail("WlanScan", result)); continue; }
-            if (notice.result.load() != wlan_notification_acm_scan_complete) {
-                out.errors.push_back({"WlanScan", static_cast<unsigned>(notice.result.load() ? ERROR_GEN_FAILURE : ERROR_TIMEOUT), "No successful fresh scan notification"}); continue;
-            }
+            // Without a confirmed fresh scan, still read the list Windows maintains from its own
+            // background scans, keeping only entries heard recently (host timestamp below).
+            if (result || notice.result.load() != wlan_notification_acm_scan_complete) out.cached = true;
             WLAN_AVAILABLE_NETWORK_LIST* raw_profiles{};
             const auto profiles_status = WlanGetAvailableNetworkList(wlan.value, &info.InterfaceGuid, 0, nullptr, &raw_profiles);
             const WlanPtr<WLAN_AVAILABLE_NETWORK_LIST> profiles(raw_profiles);
@@ -448,8 +448,14 @@ public:
             const WlanPtr<WLAN_BSS_LIST> entries(raw_bss);
             if (code) { out.errors.push_back(fail("WlanGetNetworkBssList", code)); continue; }
             if (!entries) continue;
+            FILETIME now_file{};
+            GetSystemTimeAsFileTime(&now_file);
+            const auto now_100ns = (static_cast<ULONGLONG>(now_file.dwHighDateTime) << 32) | now_file.dwLowDateTime;
+            constexpr ULONGLONG max_age_100ns = 120ull * 10'000'000ull;
             for (DWORD j = 0; j < entries->dwNumberOfItems && out.bss.size() < 2048 && !stop.stop_requested(); ++j) {
                 const auto& e = entries->wlanBssEntries[j];
+                // ullHostTimestamp: host time (FILETIME) when the beacon/probe response was received.
+                if (e.ullHostTimestamp && e.ullHostTimestamp < now_100ns && now_100ns - e.ullHostTimestamp > max_age_100ns) { ++out.stale_dropped; continue; }
                 Bss b{guid_text(info.InterfaceGuid), label(e.dot11Ssid), mac(e.dot11Bssid),
                     (e.usCapabilityInformation & 0x10) ? "Privacy bit set (suite unverified)" : "No privacy bit", {},
                     static_cast<int>(e.lRssi), static_cast<unsigned>(e.ulChCenterFrequency / 1000), 0};

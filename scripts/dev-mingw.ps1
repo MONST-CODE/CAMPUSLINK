@@ -35,8 +35,9 @@ $lock = Get-Content -LiteralPath (Join-Path $root 'deps.lock') -Raw | ConvertFro
 if ((Get-Content -LiteralPath (Join-Path $imgui 'imgui.h') -Raw) -notmatch ('#define\s+IMGUI_VERSION\s+"' + [regex]::Escape($lock.imgui.version) + '"')) {
     throw "Expected Dear ImGui $($lock.imgui.version) in $imgui"
 }
-$revision = (& git.exe -C $root rev-parse --short=12 HEAD 2>$null)
-if ($LASTEXITCODE -ne 0 -or -not $revision) { $revision = 'devbuild0000' }
+# PowerShell 5.1 turns native stderr into an error record; outside a Git checkout keep going.
+$revision = try { $ErrorActionPreference = 'Continue'; (& git.exe -C $root rev-parse --short=12 HEAD 2>$null) } finally { $ErrorActionPreference = 'Stop' }
+if ($LASTEXITCODE -ne 0 -or $revision -notmatch '^[0-9a-f]{12}$') { $revision = 'devbuild0000' }
 [void][IO.Directory]::CreateDirectory($obj); [void][IO.Directory]::CreateDirectory($bin)
 $env:PATH = (Join-Path $Msys 'bin') + ';' + $env:PATH
 

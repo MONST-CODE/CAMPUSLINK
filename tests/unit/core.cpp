@@ -293,6 +293,24 @@ int main() {
         require(net::retry_elsewhere(F::radio) && net::retry_elsewhere(F::association_unconfirmed) &&
             !net::retry_elsewhere(F::authentication) && !net::retry_elsewhere(F::ip_unconfirmed), "retry policy inverted");
     });
+    check("assisted start pre-selection is explainable and bounded", [] {
+        auto weak5 = target, strong24 = target, unsaved = target, far5 = target;
+        weak5.bssid.back() = '5'; weak5.rssi = -66; weak5.mhz = 5180;
+        strong24.bssid.back() = '2'; strong24.rssi = -61; strong24.mhz = 2412;
+        far5.bssid.back() = '6'; far5.rssi = -78; far5.mhz = 5500;
+        unsaved.bssid.back() = '9'; unsaved.rssi = -30; unsaved.profile.clear();
+        const std::array set{strong24, weak5, unsaved, far5};
+        const auto pick = net::recommend_start(set);
+        require(pick && pick->index == 1 && pick->reason == net::StartReason::wider_band, "5 GHz with sufficient signal not preferred");
+        weak5.rssi = -71;  // bonus does not outweigh a 10 dB deficit
+        const std::array set2{strong24, weak5, far5};
+        const auto second = net::recommend_start(set2);
+        require(second && second->index == 0 && second->reason == net::StartReason::strongest, "band bonus overrode a large signal deficit");
+        const std::array only_far{strong24, far5};
+        require(net::recommend_start(only_far)->index == 0, "weak 5 GHz below the floor was preferred");
+        const std::array none{unsaved};
+        require(!net::recommend_start(none), "unsaved access point recommended");
+    });
     check("SSIDs display as UTF-8 and never inject controls", [] {
         require(net::display_ssid("Caf\\xc3\\xa9 Campus") == "Café Campus", "UTF-8 SSID not decoded");
         require(net::display_ssid("Lab\\x5cNet") == "Lab\\Net", "escaped backslash not restored");
