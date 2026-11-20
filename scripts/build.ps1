@@ -202,7 +202,7 @@ try {
         $tools.compiler = if (Test-Path -LiteralPath $pinnedCompiler -PathType Leaf) { $pinnedCompiler } else {
             Find-Tool 'clang++.exe' @("$env:ProgramFiles\LLVM\bin\clang++.exe")
         }
-        $tools.netLibraries = @('wlanapi','iphlpapi','ws2_32','setupapi','ole32','advapi32')
+        $tools.netLibraries = @('wlanapi','iphlpapi','ws2_32','setupapi','ole32','oleaut32','advapi32')
         Require-Files @($tools.netLibraries | ForEach-Object { Join-Path $env:WindowsSdkDir "Lib\$sdk\um\x64\$_.lib" })
         if (-not $tools.compiler) { throw 'LLVM clang++.exe not found. Install LLVM x64 and add its bin directory to PATH.' }
         $llvm = Split-Path -Parent $tools.compiler

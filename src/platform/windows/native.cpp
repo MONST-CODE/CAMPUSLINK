@@ -9,6 +9,8 @@
 #include <setupapi.h>
 #include <objbase.h>
 #include <netlistmgr.h>
+#include <ocidl.h>
+#include <oleauto.h>
 
 #include "campuslink/network.hpp"
 #include "campuslink/dns.hpp"
@@ -21,6 +23,8 @@
 #include <cstring>
 #include <memory>
 #include <numeric>
+#include <string>
+#include <string_view>
 #include <thread>
 
 namespace campuslink::net {
@@ -282,6 +286,32 @@ struct ScanNotice {
         }
     }
 };
+// Connection outcome reported by the auto-configuration module for one interface and profile.
+// Callbacks run on a WLAN service thread; every field read across threads is atomic.
+struct ConnectNotice {
+    GUID guid{};
+    std::wstring profile;
+    std::atomic<bool> completed{}, disconnected{};
+    std::atomic<DWORD> reason{}, last_attempt_reason{};
+    ConnectNotice(const GUID& g, const wchar_t* p) : guid(g), profile(p) {}
+    static void WINAPI callback(PWLAN_NOTIFICATION_DATA data, PVOID context) {
+        auto& self = *static_cast<ConnectNotice*>(context);
+        if (!data || data->NotificationSource != WLAN_NOTIFICATION_SOURCE_ACM || !IsEqualGUID(data->InterfaceGuid, self.guid)) return;
+        const auto code = data->NotificationCode;
+        if (code == wlan_notification_acm_disconnected) { self.disconnected.store(true, std::memory_order_release); return; }
+        if (code != wlan_notification_acm_connection_complete && code != wlan_notification_acm_connection_attempt_fail) return;
+        if (!data->pData || data->dwDataSize < sizeof(WLAN_CONNECTION_NOTIFICATION_DATA)) return;
+        const auto* info = static_cast<const WLAN_CONNECTION_NOTIFICATION_DATA*>(data->pData);
+        if (std::wstring_view(info->strProfileName, wcsnlen(info->strProfileName, WLAN_MAX_NAME_LENGTH)) != self.profile) return;
+        if (code == wlan_notification_acm_connection_attempt_fail) {
+            self.last_attempt_reason.store(info->wlanReasonCode, std::memory_order_release);
+            return;
+        }
+        self.reason.store(info->wlanReasonCode, std::memory_order_release);
+        if (info->wlanReasonCode != WLAN_REASON_CODE_SUCCESS) self.last_attempt_reason.store(info->wlanReasonCode, std::memory_order_release);
+        self.completed.store(true, std::memory_order_release);
+    }
+};
 struct Socket { SOCKET value{INVALID_SOCKET}; ~Socket() { if (value != INVALID_SOCKET) closesocket(value); } };
 struct Winsock { WSADATA data{}; int code{WSAStartup(MAKEWORD(2, 2), &data)}; ~Winsock() { if (!code) WSACleanup(); } };
 struct Icmp { HANDLE value{IcmpCreateFile()}; ~Icmp() { if (value != INVALID_HANDLE_VALUE) IcmpCloseHandle(value); } };
@@ -446,6 +476,8 @@ public:
         // Use typed GUID values rather than the compiler extension __uuidof.
         constexpr GUID clsid{0xdcb00c01, 0x570f, 0x4a9b, {0x8d, 0x69, 0x19, 0x9f, 0xdb, 0xa5, 0x72, 0x3b}};
         constexpr GUID iid{0xdcb00000, 0x570f, 0x4a9b, {0x8d, 0x69, 0x19, 0x9f, 0xdb, 0xa5, 0x72, 0x3b}};
+        // IID_IPropertyBag (ocidl.idl).
+        constexpr GUID iid_bag{0x55272a00, 0x42cb, 0x11ce, {0x81, 0x35, 0x00, 0xaa, 0x00, 0x4b, 0xb8, 0x51}};
         void* raw_manager{};
         if (FAILED(CoCreateInstance(clsid, nullptr, CLSCTX_ALL, iid, &raw_manager)) || !raw_manager) return Reachability::unknown;
         const std::unique_ptr<INetworkListManager, decltype(release)> manager(static_cast<INetworkListManager*>(raw_manager), release);
@@ -462,6 +494,21 @@ public:
             NLM_CONNECTIVITY classification{};
             if (FAILED(connection->GetAdapterId(&id)) || !equal_id(guid_text(id), adapter.id) ||
                 FAILED(connection->GetConnectivity(&classification))) continue;
+            // NCSI marks a captive portal as WEBHIJACK in NA_InternetConnectivityV4/V6 (Windows 10 1709+).
+            // A portal can coexist with a stale INTERNET bit, so check it first.
+            void* raw_bag{};
+            if (SUCCEEDED(connection->QueryInterface(iid_bag, &raw_bag)) && raw_bag) {
+                const std::unique_ptr<IPropertyBag, decltype(release)> bag(static_cast<IPropertyBag*>(raw_bag), release);
+                for (const auto* name : {L"NA_InternetConnectivityV4", L"NA_InternetConnectivityV6"}) {
+                    VARIANT value; VariantInit(&value);
+                    if (SUCCEEDED(bag->Read(name, &value, nullptr)) && (value.vt == VT_UI4 || value.vt == VT_I4) &&
+                        (static_cast<unsigned long>(value.vt == VT_UI4 ? value.ulVal : static_cast<unsigned long>(value.lVal)) & NLM_INTERNET_CONNECTIVITY_WEBHIJACK)) {
+                        VariantClear(&value);
+                        return Reachability::portal;
+                    }
+                    VariantClear(&value);
+                }
+            }
             if (classification & (NLM_CONNECTIVITY_IPV4_INTERNET | NLM_CONNECTIVITY_IPV6_INTERNET)) return Reachability::internet;
             if (classification != NLM_CONNECTIVITY_DISCONNECTED) evidence = Reachability::local_only;
         }
@@ -470,10 +517,25 @@ public:
     std::optional<Error> connect(const Bss& b, std::stop_token stop) override { return join(b, true, stop); }
     std::optional<Error> connect_profile(const Bss& b, std::stop_token stop) override { return join(b, false, stop); }
 private:
-    std::optional<Error> request_wifi(const Bss& b, WifiMode mode, std::stop_token stop, WifiTiming& timing) override {
-        return join(b, mode == WifiMode::assisted, stop, &timing);
+    std::optional<Error> request_wifi(const Bss& b, WifiMode mode, std::stop_token stop, WifiTiming& timing,
+                                      const WifiBudget& budget, const WifiProgressSink& progress) override {
+        return join(b, mode == WifiMode::assisted, stop, &timing, budget, progress);
     }
-    std::optional<Error> join(const Bss& b, bool exact, std::stop_token stop, WifiTiming* timing = nullptr) {
+    static Error reported(DWORD reason, std::string detail, WifiFailure fallback) {
+        Error e{"WlanConnect", reason, std::move(detail), false, fallback, reason, {}};
+        if (reason) {
+            const auto mapped = classify_wlan_reason(reason);
+            if (mapped != WifiFailure::unspecified) e.wifi_failure = mapped;
+            wchar_t text[512]{};
+            if (WlanReasonCodeToString(reason, 512, text, nullptr) == ERROR_SUCCESS) e.os_message = utf8(text);
+        }
+        return e;
+    }
+    // Phase A waits for Windows to report the outcome of this association (notification or
+    // observed state); phase B waits for a stable usable IPv4 address and gateway. Only phase A
+    // is ever cancelled at adapter level: once associated, the address is Windows' business.
+    std::optional<Error> join(const Bss& b, bool exact, std::stop_token stop, WifiTiming* timing = nullptr,
+                              const WifiBudget& budget = {}, const WifiProgressSink& progress = {}) {
         const auto start = Clock::now();
         const auto elapsed = [&] { return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start); };
         if (stop.stop_requested()) return Error{"WlanConnect", ERROR_CANCELLED, "Cancelled before connection"};
@@ -511,68 +573,100 @@ private:
                 }
                 target_ssid.ucSSID[target_ssid.uSSIDLength++] = static_cast<UCHAR>(value);
             }
+            ConnectNotice notice(info.InterfaceGuid, profile);
+            const auto registered = WlanRegisterNotification(wlan.value, WLAN_NOTIFICATION_SOURCE_ACM, TRUE, ConnectNotice::callback, &notice, nullptr, nullptr);
+            // Unregistering waits for in-flight callbacks, so `notice` outlives every callback.
+            struct Unregister {
+                HANDLE handle; bool active;
+                ~Unregister() { if (active) WlanRegisterNotification(handle, WLAN_NOTIFICATION_SOURCE_NONE, TRUE, nullptr, nullptr, nullptr, nullptr); }
+            } unregister{wlan.value, registered == ERROR_SUCCESS};
             WLAN_CONNECTION_PARAMETERS params{wlan_connection_mode_profile, profile, target_ssid.uSSIDLength ? &target_ssid : nullptr,
                 exact ? &desired : nullptr, dot11_BSS_type_infrastructure, 0};
             const auto code = WlanConnect(wlan.value, &info.InterfaceGuid, &params, nullptr);
             if (code) { auto e = fail("WlanConnect", code); e.wifi_failure = WifiFailure::request; return e; }
-            const auto end = Clock::now() + 15s;
-            std::string last_ip, last_gateway;
-            bool saw_association{};
-            while (Clock::now() < end && !stop.stop_requested()) {
-                const auto current = snapshot(stop, false);
-                const auto match = std::find_if(current.interfaces.begin(), current.interfaces.end(), [&](const auto& item) {
-                    return equal_id(item.id, b.interface_id) && item.associated && item.profile == b.profile && (b.ssid.empty() || item.ssid == b.ssid) && (!exact || item.bssid == b.bssid);
-                });
-                if (match != current.interfaces.end()) {
-                    if (timing && !timing->association) timing->association = elapsed();
-                    saw_association = true;
-                    if (usable_ipv4(match->address) && usable_ipv4(match->gateway)) {
-                        if (match->up && match->address == last_ip && match->gateway == last_gateway) {
-                            if (timing) timing->usable = elapsed();
-                            return {};
-                        }
-                        last_ip = match->address; last_gateway = match->gateway;
-                    } else { last_ip.clear(); last_gateway.clear(); }
-                } else { last_ip.clear(); last_gateway.clear(); }
-                if (!settle(300ms, stop)) break;
-            }
-            // The API cancels at adapter level, not by request ID. Don't tear down a
-            // different association that Windows or the user may already have restored.
-            const auto latest = snapshot({}, false);
-            const auto live = std::find_if(latest.interfaces.begin(), latest.interfaces.end(), [&](const auto& item) {
-                return equal_id(item.id, b.interface_id);
-            });
-            const bool another_link = live != latest.interfaces.end() && live->associated &&
-                (live->profile != b.profile || live->ssid != b.ssid || (exact && live->bssid != b.bssid));
-            const bool idle = live != latest.interfaces.end() && live->wlan_idle;
-            if (!another_link && (!idle || stop.stop_requested())) {
-                const auto disconnect = WlanDisconnect(wlan.value, &info.InterfaceGuid, nullptr);
-                if (disconnect != ERROR_SUCCESS) {
-                    auto e = fail("WlanDisconnect", disconnect);
-                    e.request_unsettled = true;
-                    return e;
+            const auto matches = [&](const Interface& item) {
+                return equal_id(item.id, b.interface_id) && item.associated && item.profile == b.profile &&
+                    (b.ssid.empty() || item.ssid == b.ssid) && (!exact || item.bssid == b.bssid);
+            };
+            const auto current_match = [&](Snapshot& holder) -> const Interface* {
+                holder = snapshot(stop, false);
+                const auto it = std::find_if(holder.interfaces.begin(), holder.interfaces.end(), matches);
+                return it == holder.interfaces.end() ? nullptr : &*it;
+            };
+            // Phase A: association and authentication.
+            bool associated{};
+            const auto associate_until = Clock::now() + budget.association;
+            while (Clock::now() < associate_until && !stop.stop_requested()) {
+                if (notice.completed.load(std::memory_order_acquire)) {
+                    const auto reason = notice.reason.load(std::memory_order_acquire);
+                    if (reason != WLAN_REASON_CODE_SUCCESS)
+                        return reported(reason, "Windows reported that the connection did not complete", WifiFailure::association_unconfirmed);
                 }
-                const auto cleanup_until = Clock::now() + 2s;
-                bool settled{};
-                do {
-                    const auto state = snapshot({}, false);
-                    const auto adapter = std::find_if(state.interfaces.begin(), state.interfaces.end(), [&](const auto& item) {
-                        return equal_id(item.id, b.interface_id);
-                    });
-                    if (adapter != state.interfaces.end() && (adapter->wlan_idle || (adapter->associated &&
-                        (adapter->profile != b.profile || adapter->ssid != b.ssid || (exact && adapter->bssid != b.bssid))))) {
-                        settled = true;
-                        break;
+                Snapshot state;
+                if (current_match(state)) { associated = true; break; }
+                if (!settle(250ms, stop)) break;
+            }
+            if (!associated) {
+                // Request still pending (no completion, no association). Cancel it at adapter level
+                // unless Windows or the user already moved the adapter elsewhere.
+                const auto latest = snapshot({}, false);
+                const auto live = std::find_if(latest.interfaces.begin(), latest.interfaces.end(), [&](const auto& item) {
+                    return equal_id(item.id, b.interface_id);
+                });
+                const bool another_link = live != latest.interfaces.end() && live->associated && !matches(*live);
+                const bool idle = live != latest.interfaces.end() && live->wlan_idle;
+                if (!another_link && (!idle || stop.stop_requested())) {
+                    const auto disconnect = WlanDisconnect(wlan.value, &info.InterfaceGuid, nullptr);
+                    if (disconnect != ERROR_SUCCESS) {
+                        auto e = fail("WlanDisconnect", disconnect);
+                        e.request_unsettled = true;
+                        return e;
                     }
-                    std::this_thread::sleep_for(100ms);
-                } while (Clock::now() < cleanup_until);
-                if (!settled) return Error{"WlanDisconnect", ERROR_TIMEOUT, "Windows did not confirm Wi-Fi request cleanup", true};
+                    // Settled once the adapter is idle or Windows itself established an association
+                    // (auto-connect). Neither leaves a request of ours pending.
+                    const auto cleanup_until = Clock::now() + 3s;
+                    bool settled{};
+                    do {
+                        const auto state = snapshot({}, false);
+                        const auto adapter = std::find_if(state.interfaces.begin(), state.interfaces.end(), [&](const auto& item) {
+                            return equal_id(item.id, b.interface_id);
+                        });
+                        if (adapter != state.interfaces.end() && (adapter->wlan_idle || adapter->associated)) { settled = true; break; }
+                        std::this_thread::sleep_for(100ms);
+                    } while (Clock::now() < cleanup_until);
+                    if (!settled) return Error{"WlanDisconnect", ERROR_TIMEOUT, "Windows did not confirm Wi-Fi request cleanup", true};
+                }
+                if (stop.stop_requested()) return fail("WlanConnect cancelled", ERROR_CANCELLED);
+                const auto hint = notice.last_attempt_reason.load(std::memory_order_acquire);
+                return reported(hint, exact ? "Windows did not confirm the requested access point in time" :
+                    "Windows did not confirm the requested network in time", WifiFailure::association_unconfirmed);
+            }
+            if (timing) timing->association = elapsed();
+            if (progress) progress({WifiStage::obtaining_address, 0, 0, b.bssid});
+            // Phase B: usable IPv4 and gateway, observed twice in a row. Never disconnect here.
+            // A disconnection notice from the previous network may arrive late: only count those
+            // after this association, and require repeated misses before declaring it lost.
+            notice.disconnected.store(false, std::memory_order_release);
+            std::string last_ip, last_gateway;
+            unsigned misses{};
+            const auto address_until = Clock::now() + budget.address;
+            while (Clock::now() < address_until && !stop.stop_requested()) {
+                Snapshot state;
+                const auto* match = current_match(state);
+                misses = match ? 0 : misses + 1;
+                if (misses >= 3 && notice.disconnected.load(std::memory_order_acquire))
+                    return reported(notice.last_attempt_reason.load(), "The association was lost while Windows was configuring the address", WifiFailure::radio);
+                if (match && usable_ipv4(match->address) && usable_ipv4(match->gateway) && match->up) {
+                    if (match->address == last_ip && match->gateway == last_gateway) {
+                        if (timing) timing->usable = elapsed();
+                        return {};
+                    }
+                    last_ip = match->address; last_gateway = match->gateway;
+                } else { last_ip.clear(); last_gateway.clear(); }
+                if (!settle(400ms, stop)) break;
             }
             if (stop.stop_requested()) return fail("WlanConnect cancelled", ERROR_CANCELLED);
-            return Error{"WlanConnect", ERROR_TIMEOUT, saw_association ?
-                "Association observed but Windows did not stabilize usable IPv4 and gateway within 15 s" :
-                exact ? "Windows did not confirm requested profile/BSSID within 15 s" : "Windows did not confirm requested profile/SSID within 15 s",
-                false, saw_association ? WifiFailure::ip_unconfirmed : WifiFailure::association_unconfirmed};
+            return Error{"DHCP", ERROR_TIMEOUT, "Associated; Windows has not yet reported a usable IPv4 address and gateway", false, WifiFailure::ip_unconfirmed};
         }
         return fail("WlanConnect interface", ERROR_NOT_FOUND);
     }

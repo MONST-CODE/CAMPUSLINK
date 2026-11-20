@@ -2,6 +2,7 @@
 
 #include <array>
 #include <chrono>
+#include <functional>
 #include <optional>
 #include <stop_token>
 #include <span>
@@ -11,8 +12,31 @@
 
 namespace campuslink::net {
 using Clock = std::chrono::steady_clock;
-enum class WifiFailure { unspecified, request, association_unconfirmed, ip_unconfirmed };
-struct Error { std::string operation; unsigned code{}; std::string detail; bool request_unsettled{}; WifiFailure wifi_failure{}; };
+// Coarse failure class. It decides what the assistant may try next:
+// only radio/association problems justify another access point of the same network.
+enum class WifiFailure {
+    unspecified,
+    request,                 // Windows refused the request (WlanConnect error)
+    association_unconfirmed, // no confirmed association, cause not reported
+    ip_unconfirmed,          // associated, IPv4/gateway not yet usable
+    authentication,          // security/802.1X negotiation failed (wrong key, EAP, ...)
+    profile,                 // saved profile unusable or incompatible with this network
+    radio,                   // access point not reachable / association rejected or timed out
+};
+// True when another BSSID of the same network can reasonably change the outcome.
+constexpr bool retry_elsewhere(WifiFailure f) {
+    return f == WifiFailure::association_unconfirmed || f == WifiFailure::radio;
+}
+struct Error {
+    std::string operation; unsigned code{}; std::string detail; bool request_unsettled{}; WifiFailure wifi_failure{};
+    unsigned wlan_reason{};   // WLAN_REASON_CODE reported by Windows, 0 if none
+    std::string os_message{}; // WlanReasonCodeToString text in the Windows display language
+};
+// Map a Windows WLAN_REASON_CODE (documented L2 reason ranges) to a failure class.
+WifiFailure classify_wlan_reason(unsigned reason);
+// Wi-Fi SSIDs are raw octets. The scanner stores them as printable ASCII with \xNN escapes
+// so they round-trip into WlanConnect. For display, decode the escapes and keep valid UTF-8.
+std::string display_ssid(std::string_view escaped);
 struct SecondarySta { std::string id; unsigned state{}; };
 struct Interface {
     std::string id, name, description, kind, hardware_id, manufacturer, driver, provider, driver_date;
@@ -100,11 +124,27 @@ std::vector<std::vector<std::size_t>> experiment_waves(const std::vector<Experim
 bool usable_ipv4(std::string_view);
 struct Diagnostic { std::string step, status, detail; };
 std::vector<Diagnostic> diagnose(const Interface*, bool detected, const Observation*);
-// Windows-reported evidence for one adapter. It is not an active Internet test.
-enum class Reachability { unknown, local_only, internet };
+// Windows-reported evidence for one adapter (Network List Manager / NCSI).
+// It is not an active Internet test run by CAMPUSLINK.
+enum class Reachability { unknown, local_only, internet, portal };
 enum class WifiMode { normal, assisted };
 struct WifiTiming {
     std::optional<std::chrono::milliseconds> association, usable, internet_reported;
+};
+// Engine-confirmed progress. The UI shows these stages; it never invents one.
+enum class WifiStage { preparing, associating, obtaining_address, checking_internet, restoring };
+struct WifiProgress {
+    WifiStage stage{WifiStage::preparing};
+    unsigned attempt{}, attempts{};  // 1-based attempt index within the plan
+    std::string bssid;
+};
+using WifiProgressSink = std::function<void(const WifiProgress&)>;
+// Bounded native waits. Association covers authentication; address covers DHCP and
+// gateway stability once the association is confirmed.
+struct WifiBudget {
+    std::chrono::milliseconds association{std::chrono::seconds(25)};
+    std::chrono::milliseconds address{std::chrono::seconds(40)};
+    std::chrono::milliseconds internet{std::chrono::seconds(12)};
 };
 struct Backend {
     virtual ~Backend() = default;
@@ -112,7 +152,10 @@ struct Backend {
     virtual Discovery scan(std::stop_token) = 0;
     virtual std::optional<Error> connect(const Bss&, std::stop_token) = 0;
     virtual std::optional<Error> connect_profile(const Bss&, std::stop_token) = 0;
-    virtual std::optional<Error> request_wifi(const Bss& b, WifiMode mode, std::stop_token stop, WifiTiming&) {
+    // Request one association. On ip_unconfirmed the association is left in place:
+    // Windows keeps negotiating the address and the caller decides what to report.
+    virtual std::optional<Error> request_wifi(const Bss& b, WifiMode mode, std::stop_token stop, WifiTiming&,
+                                              const WifiBudget& = {}, const WifiProgressSink& = {}) {
         return mode == WifiMode::assisted ? connect(b, stop) : connect_profile(b, stop);
     }
     virtual Reachability reachability(const Interface&) { return Reachability::unknown; }
@@ -122,17 +165,23 @@ struct Handoff { std::string state; bool rolled_back{}; std::optional<Error> err
 Handoff select(Backend&, const Scope&, const Bss&, std::stop_token);
 // Authorized active measurement of a current association. Never requests a link change.
 Handoff observe_path(Backend&, const Scope&, std::string_view interface_id, std::stop_token);
-enum class WifiStatus { invalid, cancelled, failed, recovery_failed, request_unsettled, local_link, internet_reported };
+// ip_pending: associated, Windows still negotiating IPv4; the association is kept.
+// portal: Windows reports a captive portal (web sign-in) on the connected adapter.
+enum class WifiStatus { invalid, cancelled, failed, recovery_failed, request_unsettled, local_link, internet_reported, ip_pending, portal };
 inline constexpr unsigned wifi_max_attempts = 4;
+inline constexpr unsigned wifi_default_attempts = 3;
+inline constexpr auto wifi_scan_ttl = std::chrono::minutes(2);
 struct WifiHistory {
     Bss candidate;
     Clock::time_point observed;
     bool success{};
 };
 struct WifiPolicy {
-    unsigned max_attempts{3};
-    Clock::time_point scanned_at{}; // When provided, enforce expiry before each mutation.
+    unsigned max_attempts{wifi_default_attempts};
+    Clock::time_point scanned_at{}; // When provided, the scan must be fresh when the operation starts.
     std::span<const WifiHistory> history{};
+    WifiBudget budget{};
+    WifiProgressSink progress{};
 };
 enum class WifiReason { selected, independent_idle, previous_success, avoid_recent_failure, signal };
 struct WifiAttempt {

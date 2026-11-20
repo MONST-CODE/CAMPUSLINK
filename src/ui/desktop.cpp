@@ -506,6 +506,7 @@ struct Screen {
         case net::WifiStatus::request_unsettled: label = Key::WifiUnsettled; break;
         case net::WifiStatus::local_link: label = Key::WifiLocal; break;
         case net::WifiStatus::internet_reported: label = Key::WifiInternet; break;
+        case net::WifiStatus::ip_pending: case net::WifiStatus::portal: label = Key::WifiLocal; break;
         }
         paragraph(tr(label));
         if (result.link) {

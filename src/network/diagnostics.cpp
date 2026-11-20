@@ -2,6 +2,7 @@
 #include "campuslink/dns.hpp"
 #include <algorithm>
 #include <charconv>
+#include <thread>
 #include <tuple>
 #include <stdexcept>
 
@@ -265,9 +266,6 @@ bool usable_link(const Interface& i) {
 bool matches_wifi(const Interface& i, const Bss& b, bool exact) {
     return i.associated && i.profile == b.profile && i.ssid == b.ssid && (!exact || i.bssid == b.bssid);
 }
-}
-namespace {
-constexpr auto wifi_scan_ttl = std::chrono::minutes(2);
 bool fresh_wifi(const WifiPolicy& policy, Clock::time_point now) {
     return policy.scanned_at == Clock::time_point{} || (policy.scanned_at <= now && now - policy.scanned_at < wifi_scan_ttl);
 }
@@ -284,6 +282,89 @@ int history_tier(const Bss& b, const WifiPolicy& policy, Clock::time_point now) 
     if (!latest->success && age < std::chrono::minutes(5)) return -1;
     return 0;
 }
+// Cooperative wait. Returns false when cancelled.
+bool wait_for(std::chrono::milliseconds span, std::stop_token stop) {
+    const auto until = Clock::now() + span;
+    while (Clock::now() < until) {
+        if (stop.stop_requested()) return false;
+        std::this_thread::sleep_for(std::min<Clock::duration>(std::chrono::milliseconds(100), until - Clock::now()));
+    }
+    return !stop.stop_requested();
+}
+// Windows' NCSI probe completes some seconds after the address. A single early read reports
+// "local only" on working networks, so poll while the report is local-only. "unknown" means the
+// backend cannot tell (no Network List Manager): do not wait for something that will not come.
+Reachability settle_reachability(Backend& backend, const Interface& link, std::chrono::milliseconds budget, std::stop_token stop) {
+    const auto deadline = Clock::now() + budget;
+    auto evidence = backend.reachability(link);
+    while (evidence == Reachability::local_only && Clock::now() < deadline) {
+        if (!wait_for(std::chrono::milliseconds(750), stop)) break;
+        evidence = backend.reachability(link);
+    }
+    return evidence;
+}
+}
+WifiFailure classify_wlan_reason(unsigned reason) {
+    // Documented L2 reason groups (l2cmn.h / wlanapi.h). Each group is 0x10000 wide;
+    // the upper half of a group holds connection-time codes.
+    constexpr unsigned group = 0x10000, half = group / 2;
+    constexpr unsigned ac = 0x20000, msm = 0x30000, security = 0x40000, onex = 0x50000, profile = 0x80000;
+    if (reason == 0) return WifiFailure::unspecified;
+    if (reason >= onex && reason < onex + group) return WifiFailure::authentication;
+    if (reason >= security && reason < security + group) return reason < security + half ? WifiFailure::profile : WifiFailure::authentication;
+    if (reason >= profile && reason < profile + group) return WifiFailure::profile;
+    if (reason >= ac && reason < ac + group) {
+        switch (reason - ac) {
+        case 1: case 2: return WifiFailure::profile;                           // network / profile not compatible
+        case half + 2: case half + 6: case half + 9: case half + 10: case half + 11:
+            return WifiFailure::radio;                                         // not visible, failed list, connect/scan call, not available
+        case half + 13: return WifiFailure::authentication;                    // key mismatch
+        case half + 3: case half + 4: case half + 7: case half + 12: case half + 15: case half + 16: case half + 17:
+            return WifiFailure::profile;                                       // policy denied, blocked, profile changed, not allowed
+        default: return WifiFailure::unspecified;
+        }
+    }
+    if (reason >= msm && reason < msm + group) {
+        const auto code = reason - msm;
+        if (code >= 1 && code <= 5) return WifiFailure::profile;               // security/phy/rate set not supported
+        switch (code) {
+        case half + 2: case half + 3: case half + 8: case half + 11: case half + 12: return WifiFailure::radio;
+        case half + 4: case half + 5: case half + 6: case half + 7: case half + 9: case half + 18: return WifiFailure::authentication;
+        default: return WifiFailure::unspecified;
+        }
+    }
+    return WifiFailure::unspecified;
+}
+std::string display_ssid(std::string_view escaped) {
+    std::string bytes;
+    bytes.reserve(escaped.size());
+    for (std::size_t i = 0; i < escaped.size(); ++i) {
+        unsigned value{};
+        if (escaped[i] == '\\' && i + 3 < escaped.size() && escaped[i + 1] == 'x' &&
+            std::from_chars(escaped.data() + i + 2, escaped.data() + i + 4, value, 16).ptr == escaped.data() + i + 4) {
+            bytes += static_cast<char>(value); i += 3;
+        } else bytes += escaped[i];
+    }
+    // Keep only well-formed UTF-8 (no overlongs, surrogates or C0/DEL controls); anything else
+    // is shown as U+FFFD so the label can never break the layout or impersonate other text.
+    std::string out;
+    const auto* p = reinterpret_cast<const unsigned char*>(bytes.data());
+    const auto* end = p + bytes.size();
+    while (p < end) {
+        const unsigned c = *p;
+        unsigned length = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : (c >> 3) == 0x1E ? 4 : 0;
+        bool valid = length && static_cast<std::size_t>(end - p) >= length;
+        unsigned code = length == 1 ? c : length == 2 ? c & 0x1F : length == 3 ? c & 0x0F : c & 0x07;
+        for (unsigned k = 1; valid && k < length; ++k) {
+            valid = (p[k] & 0xC0) == 0x80;
+            code = (code << 6) | (p[k] & 0x3F);
+        }
+        if (valid) valid = !(length == 2 && code < 0x80) && !(length == 3 && (code < 0x800 || (code >= 0xD800 && code <= 0xDFFF))) &&
+            !(length == 4 && (code < 0x10000 || code > 0x10FFFF)) && !(code < 0x20 || code == 0x7F);
+        if (valid) { out.append(reinterpret_cast<const char*>(p), length); p += length; }
+        else { out += "\xEF\xBF\xBD"; ++p; }
+    }
+    return out;
 }
 std::vector<Bss> wifi_plan(const Bss& selected, const Discovery& scan, const Snapshot& topology, WifiMode mode, WifiPolicy policy, Clock::time_point now) {
     if (!fresh_wifi(policy, now) || selected.profile.empty() || selected.ssid.empty() || !bssid_format(selected.bssid) ||
@@ -325,18 +406,26 @@ WifiResult connect_wifi(Backend& backend, const Bss& selected, const Discovery& 
         result.status = status;
         return std::move(result);
     };
+    std::size_t total{};
+    const auto report = [&](WifiStage stage, std::size_t index, const std::string& bssid) {
+        if (policy.progress) policy.progress({stage, static_cast<unsigned>(index), static_cast<unsigned>(total), bssid});
+    };
     if (stop.stop_requested()) return finish(WifiStatus::cancelled);
+    // Freshness gates the decision to start. Once started, an attempt in progress is never
+    // invalidated by the clock: the plan was built from that scan and is bounded.
     if (!fresh_wifi(policy, start)) return finish(WifiStatus::invalid);
+    report(WifiStage::preparing, 0, selected.bssid);
     const auto topology = backend.inspect(stop);
     const auto plan = wifi_plan(selected, scan, topology, mode, policy, start);
+    total = plan.size();
     if (stop.stop_requested()) return finish(WifiStatus::cancelled);
     if (plan.empty()) return finish(WifiStatus::invalid);
     // An operation may restore at most one displaced link. If a later mutation
     // would require another restoration, skip it rather than overspend the budget.
     const bool exact = mode == WifiMode::assisted;
-    for (const auto& trial : plan) {
+    for (std::size_t index = 0; index < plan.size(); ++index) {
+        const auto& trial = plan[index];
         if (stop.stop_requested()) return finish(WifiStatus::cancelled);
-        if (!fresh_wifi(policy, Clock::now())) return finish(WifiStatus::invalid);
         const auto before = backend.inspect(stop);
         const auto* previous = find(before, trial.interface_id);
         if (stop.stop_requested()) return finish(WifiStatus::cancelled);
@@ -346,7 +435,6 @@ WifiResult connect_wifi(Backend& backend, const Bss& selected, const Discovery& 
             if (previous->associated || !previous->wlan_idle || !primary || !primary->hardware_interface || !previous->hardware_interface ||
                 previous->device_instance.empty() || primary->device_instance.empty() || previous->device_instance == primary->device_instance) continue;
         }
-        if (!fresh_wifi(policy, Clock::now())) return finish(WifiStatus::invalid);
         const bool mutation = !(usable_link(*previous) && matches_wifi(*previous, trial, exact));
         if (mutation && previous->associated && result.recovery_attempted) continue;
         const auto tier = history_tier(trial, policy, start);
@@ -354,24 +442,41 @@ WifiResult connect_wifi(Backend& backend, const Bss& selected, const Discovery& 
             tier < 0 ? WifiReason::avoid_recent_failure : trial.interface_id != selected.interface_id ? WifiReason::independent_idle : WifiReason::signal;
         WifiAttempt attempt{trial, {}, {}, reason};
         const auto attempted_at = Clock::now();
-        if (mutation) attempt.error = backend.request_wifi(trial, mode, stop, attempt.timing);
+        report(WifiStage::associating, index + 1, trial.bssid);
+        const WifiProgressSink forward = policy.progress ? WifiProgressSink([&](const WifiProgress& p) {
+            report(p.stage, index + 1, trial.bssid);
+        }) : WifiProgressSink{};
+        if (mutation) attempt.error = backend.request_wifi(trial, mode, stop, attempt.timing, policy.budget, forward);
         auto& failure = attempt.error;
         const auto after = backend.inspect(stop);
         const auto* linked = find(after, trial.interface_id);
         if (!failure && !stop.stop_requested() && linked && usable_link(*linked) && matches_wifi(*linked, trial, exact)) {
-            result.evidence = backend.reachability(*linked);
+            report(WifiStage::checking_internet, index + 1, trial.bssid);
+            result.evidence = settle_reachability(backend, *linked, policy.budget.internet, stop);
             if (result.evidence == Reachability::internet)
                 attempt.timing.internet_reported = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - attempted_at);
             result.attempts.push_back(std::move(attempt));
             result.link = *linked;
-            return finish(result.evidence == Reachability::internet ? WifiStatus::internet_reported : WifiStatus::local_link); // Keep even a local-only link for Windows/portal sign-in. Never try other credentials.
+            // Keep a local-only or portal link for Windows sign-in. Never try other credentials.
+            return finish(result.evidence == Reachability::internet ? WifiStatus::internet_reported :
+                          result.evidence == Reachability::portal ? WifiStatus::portal : WifiStatus::local_link);
         }
         if (!failure && !stop.stop_requested()) failure = Error{"validation", 0, "Expected Wi-Fi link and usable IPv4 gateway not confirmed", false,
             linked && matches_wifi(*linked, trial, exact) ? WifiFailure::ip_unconfirmed : WifiFailure::association_unconfirmed};
+        if (stop.stop_requested() && !failure) failure = Error{"WlanConnect", 1223, "Cancelled before connection"};
         const bool unsettled = failure && failure->request_unsettled;
+        const auto failure_class = failure ? failure->wifi_failure : WifiFailure::unspecified;
+        // Associated but the address is still being negotiated. If nothing usable was displaced,
+        // keep the association: Windows continues DHCP and tearing it down can only make it worse.
+        const bool displaced_usable = mutation && usable_link(*previous) && bssid_format(previous->bssid) && !previous->profile.empty();
+        if (failure_class == WifiFailure::ip_unconfirmed && !displaced_usable && !stop.stop_requested() && linked && matches_wifi(*linked, trial, exact)) {
+            result.attempts.push_back(std::move(attempt));
+            result.link = *linked;
+            return finish(WifiStatus::ip_pending);
+        }
         result.attempts.push_back(std::move(attempt));
         if (unsettled) return finish(WifiStatus::request_unsettled);
-        if (mutation && usable_link(*previous) && bssid_format(previous->bssid) && !previous->profile.empty()) {
+        if (displaced_usable) {
             const Bss restore{previous->id, previous->ssid, previous->bssid, {}, previous->profile};
             auto recovery = backend.inspect({});
             const auto recovered = [&] {
@@ -383,6 +488,7 @@ WifiResult connect_wifi(Backend& backend, const Bss& selected, const Discovery& 
                 if (current && current->associated && !matches_wifi(*current, restore, true) && !matches_wifi(*current, trial, exact))
                     return finish(WifiStatus::recovery_failed); // Do not override an observed external change.
                 result.recovery_attempted = true;
+                report(WifiStage::restoring, index + 1, previous->bssid);
                 const auto error = backend.connect(restore, {});
                 recovery = backend.inspect({});
                 if (error || !recovered()) return finish(WifiStatus::recovery_failed);
@@ -390,6 +496,9 @@ WifiResult connect_wifi(Backend& backend, const Bss& selected, const Discovery& 
             result.restored = true;
         }
         if (stop.stop_requested()) return finish(WifiStatus::cancelled);
+        // Only radio/association problems justify another access point of the same network.
+        // Authentication, profile and address problems are network-wide: stop and explain.
+        if (!retry_elsewhere(failure_class)) break;
     }
     return finish(WifiStatus::failed);
 }
