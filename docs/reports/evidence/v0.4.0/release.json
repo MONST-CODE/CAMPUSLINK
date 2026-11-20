@@ -1,0 +1,58 @@
+{
+  "assets": [
+    {
+      "browser_download_url": "https://github.com/MONST-CODE/CAMPUSLINK/releases/download/v0.4.0/BUILD_INFO.json",
+      "digest": "sha256:a766e6e17a31779591deff3eaed874f97fee6db3be4c770cc72f9408c8f6ed67",
+      "name": "BUILD_INFO.json",
+      "size": 4593
+    },
+    {
+      "browser_download_url": "https://github.com/MONST-CODE/CAMPUSLINK/releases/download/v0.4.0/CAMPUSLINK-0.4.0-windows-x64-portable.zip",
+      "digest": "sha256:4a5d8f9e7bf435ef4fee935a80150428e701808757c80701571f2fe7346491c1",
+      "name": "CAMPUSLINK-0.4.0-windows-x64-portable.zip",
+      "size": 2441140
+    },
+    {
+      "browser_download_url": "https://github.com/MONST-CODE/CAMPUSLINK/releases/download/v0.4.0/deps.lock",
+      "digest": "sha256:4c2dd9ff7108d1959f212cdf18aee51a0928414f0e11e878a6afec6a3b6e12d4",
+      "name": "deps.lock",
+      "size": 2249
+    },
+    {
+      "browser_download_url": "https://github.com/MONST-CODE/CAMPUSLINK/releases/download/v0.4.0/manifest.json",
+      "digest": "sha256:0f10e0fdc165e432ba34e51fb6521925842320a148720299b70cef999883fd11",
+      "name": "manifest.json",
+      "size": 10590
+    },
+    {
+      "browser_download_url": "https://github.com/MONST-CODE/CAMPUSLINK/releases/download/v0.4.0/RELEASE_NOTES.md",
+      "digest": "sha256:0b1adc9ea23a878c940d99680a2ff9eb7daa9ace78418ab0b0014d78f50c1d12",
+      "name": "RELEASE_NOTES.md",
+      "size": 331
+    },
+    {
+      "browser_download_url": "https://github.com/MONST-CODE/CAMPUSLINK/releases/download/v0.4.0/RELEASE_REPORT.md",
+      "digest": "sha256:8e72c6e83dd5fc42a74d771ce938bef62f353c121d1b9222b647a2a14e3a18b4",
+      "name": "RELEASE_REPORT.md",
+      "size": 310
+    },
+    {
+      "browser_download_url": "https://github.com/MONST-CODE/CAMPUSLINK/releases/download/v0.4.0/SHA256SUMS.txt",
+      "digest": "sha256:02738bd457256388bbdebed5fa425299be85b68d75cd60300a6f039b78651851",
+      "name": "SHA256SUMS.txt",
+      "size": 188
+    },
+    {
+      "browser_download_url": "https://github.com/MONST-CODE/CAMPUSLINK/releases/download/v0.4.0/windows-ci-logs.zip",
+      "digest": "sha256:fd657ab17248c84241d937b21595eb87a5deffd7788f01956bde0df84bb3e205",
+      "name": "windows-ci-logs.zip",
+      "size": 9563
+    }
+  ],
+  "draft": false,
+  "html_url": "https://github.com/MONST-CODE/CAMPUSLINK/releases/tag/v0.4.0",
+  "id": 452284803,
+  "prerelease": true,
+  "tag_name": "v0.4.0",
+  "target_commitish": "7ad1e93d943ed423b2474e3a591ed409643ade7d"
+}

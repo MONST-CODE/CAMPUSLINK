@@ -1,0 +1,46 @@
+PASS bilingual UI catalog, composed diagnostics and French UTF-8
+PASS display settings round trip, overwrite and corruption fallback
+PASS normal Wi-Fi delegates BSSID selection to Windows without a scope or probes
+PASS direct Wi-Fi assistance works without a normal attempt and prefers an independent idle radio on failure
+PASS assistance preserves a local-only link for sign-in and refuses stale identity and busy radios
+PASS assistance stops when Windows cannot cancel the previous request
+PASS Wi-Fi failures verify rollback and cancellation prevents further attempts
+PASS Healthy
+PASS DHCP pool exhausted
+PASS No DHCP response
+PASS Lease expiry and renewal
+PASS Invalid IP
+PASS Gateway unavailable
+PASS Slow DNS
+PASS DNS unavailable
+PASS Weak signal
+PASS Congestion
+PASS Loss and jitter
+PASS Unstable access
+PASS Logical IP conflict
+PASS No access point
+PASS Association rejected
+PASS Authentication denied
+PASS DHCP renewal retains a slot without restarting DORA
+PASS transition contract
+PASS pool capacity and lease ownership/expiry
+PASS scheduler cancellation and 10k clients
+PASS scenario codec
+PASS capacity profiler budgets
+PASS score bounded, missingness and eligibility
+PASS ranking freshness, cooldown and hysteresis
+PASS handoff ranks only the latest host-validated same-interface evidence
+PASS scope strict validation
+PASS bounded DNS reply validation
+PASS discovery preserves multiple BSS per SSID; APIPA stays hypothesis
+PASS authorized handoff and post-connect validation
+PASS scope rejection, absent adapter, cancellation make no mutation
+PASS one rollback when endpoint verification fails
+PASS failed connection and failed rollback are bounded and preserve timeout
+PASS distribution and incomplete transfer confidence
+PASS experiment waves enforce explicit permission and device independence
+PASS multi-scope codec, hard caps and comparison identity
+PASS rollback must verify Windows state and gateway policy
+PASS cancellation restores only the captured link when rollback is allowed
+PASS 50k logical clients deterministic completion
+SUMMARY 45 passed, 0 failed
