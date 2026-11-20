@@ -1,33 +1,52 @@
-# User guide
+# User guide / Guide utilisateur
 
-Extract the entire portable ZIP. Start `CampusLink.exe` next to `SDL3.dll`; Vulkan is tried first, software is used if it fails. The software renderer is not a Wi-Fi simulation.
+Extract the entire portable ZIP. Start `CampusLink.exe` next to `SDL3.dll`; Vulkan is tried first, software rendering is used if it fails. The software renderer is not a Wi-Fi simulation.
 
-## Connecter ce PC au Wi-Fi / Connect this PC to Wi-Fi
+## Se connecter à un réseau Wi-Fi
 
-1. Sur l’accueil, choisissez **Me connecter à un réseau**. CAMPUSLINK actualise la liste à votre demande. Un même SSID peut apparaître plusieurs fois : chaque ligne indique un point d’accès (BSSID), son signal et l’adaptateur qui l’a détecté.
-2. Sélectionnez une ligne, puis **Connexion normale** (choix par défaut) ou **Connexion assistée directe**. Le premier laisse Windows choisir le point d’accès. Le second peut être lancé immédiatement, sans essai normal préalable, ou après un échec. Après confirmation, il tente le BSSID sélectionné puis, si nécessaire, des alternatives compatibles. Choisissez un budget de 1 à 4 tentatives au total (3 par défaut). Les résultats ciblés récents, la disponibilité d’une carte physique distincte et le signal guident l’ordre. Sur une seule carte, les tentatives sont séquentielles. Un changement peut interrompre la connexion de cet adaptateur.
-3. Si le réseau n’a pas de profil enregistré, ouvrez les paramètres Wi-Fi depuis CAMPUSLINK et faites la première connexion dans Windows, puis actualisez le scan. Les identifiants et l’adresse IP restent gérés par Windows. Si Windows propose une page d’identification, terminez-y la connexion ; CAMPUSLINK ne contourne pas les portails captifs.
+L’application s’ouvre sur **Connexion Wi-Fi**.
 
-From Home, choose **Connect to Wi-Fi**, then select a row. **Connect normally** (default) leaves the access point choice to Windows. **Connect with assistance** can be started directly or after a normal failure. It starts with the selected BSSID, and tries compatible alternatives up to the selected total budget (1–4, default 3). Recent targeted outcomes, idle independent adapters and signal guide the ordering. On one adapter the trials are sequential. If a profile is missing, use **Open Windows Wi-Fi settings** and connect there first, then rescan. Complete any captive portal sign-in through Windows.
+1. **Connexion actuelle** (à droite) : nom du réseau, état Internet signalé par Windows (*Internet*, *Identification requise*, *Internet non confirmé*), signal, bande et canal, adresse IPv4, passerelle et carte. **Actualiser** relit l’état ; l’âge de l’information est affiché.
+2. **Réseaux à proximité** : cliquez sur **Rechercher les réseaux**. Chaque réseau apparaît une seule fois, avec sa sécurité, ses bandes et son nombre de points d’accès. Le badge indique **Connecté**, **Enregistré** (profil Windows existant) ou **Non enregistré**. Si Windows ne confirme pas une nouvelle recherche à temps, CAMPUSLINK affiche les réseaux entendus au cours des deux dernières minutes et le signale.
+3. Sélectionnez un réseau, puis choisissez :
+   - **Connexion normale** — Windows utilise le profil enregistré et choisit le point d’accès.
+   - **Connexion assistée directe** — CAMPUSLINK commence par le point d’accès de départ (présélectionné et marqué **Recommandé** : signal le plus fort, ou 5/6 GHz si son signal est suffisant ; vous pouvez en choisir un autre). Il n’en essaie d’autres **que si l’association échoue**, au plus trois au total. Aucun essai normal préalable n’est nécessaire.
+4. Si la carte est déjà connectée à un autre réseau, une confirmation explique qu’elle sera déconnectée et que la connexion précédente sera rétablie en cas d’échec.
+5. Pendant l’opération, les étapes **Préparation → Association → Adresse IP → Internet** reflètent ce que Windows a réellement confirmé. **Annuler** arrête l’opération.
+6. Le résultat explique la situation et propose l’action utile :
+   - **Connecté** : Windows signale un accès Internet.
+   - **Identification requise** : un portail captif demande une connexion web. **Ouvrir la page d’identification** ouvre la page de test de Windows, qui redirige vers le portail. CAMPUSLINK ne contourne jamais cette étape.
+   - **Connecté, Internet non confirmé** : association et passerelle fonctionnent, Windows n’a pas confirmé Internet (filtrage, saturation, portail non détecté).
+   - **Associé, adresse en attente** : le réseau tarde à fournir une adresse IP ; l’association est **conservée** pour laisser le DHCP aboutir. **Vérifier à nouveau** relit l’état.
+   - **Échec** : la cause est indiquée (authentification, profil, radio/association, adresse IP, demande refusée) avec le message de Windows lorsqu’il existe. Après un échec d’authentification ou de profil, changer de point d’accès ne servirait à rien : corrigez le mot de passe ou le profil dans les paramètres Wi-Fi de Windows.
+   - **Détails** : durée, tentatives, raison du choix de chaque point d’accès, minutages d’association, d’adresse et d’Internet, code Windows.
 
-Neither mode requires `test_scope.conf`, sends CLP1 traffic or creates simulated clients. A usable local link here means that the expected association and a usable IPv4 address and gateway were observed; it does not prove gateway response, Internet access or portal detection. Windows connectivity is classified for the connected adapter and may lag. Reported signal and negotiated link rates are not throughput. IPv6-only links are not validated in this version. If a failed attempt had displaced an existing usable association, the app tries once to restore it and verifies the result before retrying; recovery is not guaranteed.
+Si le réseau n’a pas de profil, **Ouvrir les paramètres Wi-Fi de Windows**, connectez-vous une première fois, puis relancez la recherche. Les identifiants, l’adresse IP et les routes restent gérés par Windows.
 
-## Chemins et laboratoire multipath / Paths and multipath lab
+## Connect to a Wi-Fi network
 
-La page montre les interfaces observées sans les présenter comme des chemins Internet validés. Après chargement d’un périmètre autorisé et consentement, vous pouvez mesurer un lien Wi-Fi actuellement associé **sans le reconnecter**. Les échantillons gardent leur interface, méthode et âge. La simulation compare trois ordonnanceurs sans envoyer de trafic. Aucun nœud, aucune passerelle et aucune agrégation réelle ne sont déployés ; la comparaison des architectures figure dans l’ADR du dépôt.
+The app opens on **Wi-Fi connection**. **Current connection** shows the network, the Internet state reported by Windows, signal, band/channel, IPv4, gateway and adapter, with the age of the information. **Search for networks** lists each network once (security, bands, number of access points, *Connected* / *Saved* / *Not saved*). When Windows does not confirm a fresh scan in time, the networks it heard in the last two minutes are shown and labelled as such.
 
-The Paths page lists observed interfaces separately from scoped endpoint evidence. Load the authorized scope and consent to measure a currently associated Wi-Fi link **without reconnecting**. Samples retain their interface, method and age. The scheduler lab sends no network traffic; no relay, gateway or real aggregation is deployed. There are no privileged components to install or remove. Quit the app to clear its in-memory Wi-Fi history, or clear it in Connection Manager.
+Select a network, then **Connect normally** (Windows picks the access point with the saved profile) or **Connect with assistance** (starts with the *Recommended* access point — strongest signal, or 5/6 GHz when its signal is sufficient — and tries others of the same network only when the association fails, at most three in total). Switching away from another network asks for confirmation and restores the previous connection on failure. Progress steps (**Preparation → Association → IP address → Internet**) follow what Windows actually confirmed; **Cancel** stops.
 
-## Advanced tools
+Results explain what happened and offer the next step: *Connected*; *Sign-in required* (captive portal — **Open the sign-in page**; never bypassed); *Connected, Internet not confirmed*; *Associated, address pending* (the association is kept while DHCP completes; **Check again**); or *Connection failed* with its cause (authentication, saved profile, radio/association, IP address, request refused) and Windows' own message. **Details** lists attempts, timings and Windows codes.
 
-- **Virtual Client Lab**: choose a logical client and DHCP pool size, lease, seed and scenario. Start, pause/resume and stop. Recording saves the scenario and a `SIMULATED` CSV under the folder in **Settings**. Replay uses the saved seed; it does not replay packets. The table previews the first 120 live clients. When a run ends, enter a client page to inspect all logical clients and select an ID for its event history. Clear removes the current logical clients from memory; it does not delete exports.
-- **Hardware Lab / Radio Capabilities**: refresh the inventory and distinguish driver data from unknowns. **Network Discovery** scans on explicit request and reports Windows permission errors. Select a BSSID to open **Connection Manager**.
-- **Physical Experiment**: edit the packaged scope example as `test_scope.conf` in the user data folder, using an explicitly authorized AP and CLP1 server. Load it in **Experiment Center**. Select the profile+BSSID, read the warnings and authorize the experiment in **Connection Manager**. This can interrupt the host connection. Do not perform the test over a session on the interface being switched. Use **Stop task** to cancel work. Queue up to four exact authorized matches for comparison. Automatic ranking never switches by itself. When enabled, rollback makes one bounded attempt to restore the immediately preceding usable link even after cancellation. See [network diagnostics](NETWORK_DIAGNOSTICS.md) for limits.
-- **Performance Lab / Intelligence Engine**: read endpoint-specific results and sample counts, per-size upload/download distributions, and a configurable weighted score with coverage. A partial transfer series is not eligible, and candidate recommendations require the same measurement method. Results are not public Internet tests or throughput guarantees.
-- **Logs & Diagnostics**: review steps separately, filter warnings and errors and export structured event codes (no WLAN keys or raw network identifiers in the export).
+Neither mode requires `test_scope.conf`, sends CLP1 traffic or creates simulated clients. The Internet state is the Windows Network List Manager report for the connected adapter, read until Windows concludes (up to 12 s); it is not an active test by CAMPUSLINK. Signal and link rates are not throughput. IPv6-only links are not validated.
 
-## Affichage / Display (0.3.0)
+## Research lab / Laboratoire
 
-La première ouverture est en français. La barre supérieure permet de passer à **EN** ou à un thème clair/sombre. Dans **Paramètres**, choisissez la police, sa taille et la densité. Les changements s’appliquent sans redémarrage. En fenêtre étroite, un menu remplace la barre latérale. Ouvrez **À propos** pour le guide de démarrage, les modules, les licences et les informations du build. Le fichier `display-v1.conf` est indépendant des périmètres et des exports ; s’il manque ou est illisible, l’application utilise les valeurs par défaut.
+The lab pages are grouped under **Research lab** and never run on their own.
 
-On first launch, the interface defaults to French. Use the toolbar language and theme controls. In **Settings**, choose font, size and density. A page menu replaces the sidebar in narrow windows. **About** contains the guided start, dependencies, licences and actual build details. A missing or unreadable display preferences file does not block startup or affect experimental scope files and lab exports.
+- **Hardware Lab / Radio Capabilities**: inventory and driver-reported capabilities, with unknowns stated. Dual-STA information is read-only.
+- **Network Discovery**: the raw per-BSSID table. Selecting a row opens **Authorized trials (CLP1)**.
+- **Virtual Client Lab**: logical clients and DHCP scenarios, offline. Recording saves the scenario and a `SIMULATED` CSV under the folder shown in **Settings**. Replay uses the saved seed; it does not replay packets.
+- **Experiment Center / Authorized trials (CLP1)**: put `test_scope.conf` in the user data folder (start from `config/test_scope.example.conf`), load it, select the exact profile+BSSID, authorize and confirm. This can interrupt the host connection: do not run it over a session that uses the interface being switched. Up to four exact authorized matches can be queued. Rollback makes one bounded attempt to restore the previous usable link, even after cancellation. See [network diagnostics](NETWORK_DIAGNOSTICS.md).
+- **Performance Lab / Intelligence Engine**: endpoint-specific results and a configurable weighted score with coverage. Not public Internet tests or throughput guarantees.
+- **Paths and multipath lab**: measure a currently associated link against the authorized endpoint **without reconnecting**, and compare scheduler models offline. No relay, gateway or real aggregation is deployed.
+- **Logs & Diagnostics**: environment, step-by-step diagnosis with status badges, recent events and TSV export (no keys or raw network identifiers).
+
+## Affichage / Display
+
+La première ouverture est en français. La barre supérieure change la langue (**FR/EN**) et le thème (clair/sombre). **Paramètres** règle la police, la taille et la densité ; les changements s’appliquent immédiatement et sont enregistrés dans `display-v1.conf`. En fenêtre étroite, un menu remplace la barre latérale et la page de connexion passe sur une colonne. Fenêtre réduite, l’application ne redessine plus.
+
+The interface starts in French; switch language and theme from the top bar. **Settings** controls font, size and density, applied immediately and saved in `display-v1.conf`. Narrow windows use a page menu and a single-column connection page. The app does not redraw while minimized.
