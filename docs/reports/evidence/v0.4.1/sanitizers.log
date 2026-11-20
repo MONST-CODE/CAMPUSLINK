@@ -1,0 +1,59 @@
+PASS bilingual UI catalog, composed diagnostics and French UTF-8
+PASS display settings round trip, overwrite and corruption fallback
+PASS normal Wi-Fi delegates BSSID selection to Windows without a scope or probes
+PASS direct Wi-Fi assistance works without a normal attempt and prefers an independent idle radio on failure
+PASS assistance preserves a local-only link for sign-in and refuses stale identity and busy radios
+PASS assistance stops when Windows cannot cancel the previous request
+PASS Wi-Fi failures verify rollback and cancellation prevents further attempts
+PASS Wi-Fi budget is clamped, alternatives deduplicated, expired scans do not mutate
+PASS Wi-Fi ranking uses fresh targeted evidence and ignores old or future observations
+PASS read-only path measurement requires approved identity and rejects roaming
+PATH_MODEL,0,0,1105.89,15.1707,0,0
+PATH_MODEL,0,1,1177.52,14.248,0,63
+PATH_MODEL,0,2,984,17.05,0,22
+PATH_MODEL,1,0,1391.09,12.0605,0,0
+PATH_MODEL,1,1,1481.7,11.3229,0,63
+PATH_MODEL,1,2,1391.09,12.0605,0,0
+PATH_MODEL,2,0,1528.38,10.9771,0,37
+PATH_MODEL,2,1,2438.21,6.88097,9,77
+PATH_MODEL,2,2,1627.4,10.3092,4,53
+PASS offline schedulers bound reorder window, recover segments and respect shared capacity
+PASS Healthy
+PASS DHCP pool exhausted
+PASS No DHCP response
+PASS Lease expiry and renewal
+PASS Invalid IP
+PASS Gateway unavailable
+PASS Slow DNS
+PASS DNS unavailable
+PASS Weak signal
+PASS Congestion
+PASS Loss and jitter
+PASS Unstable access
+PASS Logical IP conflict
+PASS No access point
+PASS Association rejected
+PASS Authentication denied
+PASS DHCP renewal retains a slot without restarting DORA
+PASS transition contract
+PASS pool capacity and lease ownership/expiry
+PASS scheduler cancellation and 10k clients
+PASS scenario codec
+PASS capacity profiler budgets
+PASS score bounded, missingness and eligibility
+PASS ranking freshness, cooldown and hysteresis
+PASS handoff ranks only the latest host-validated same-interface evidence
+PASS scope strict validation
+PASS bounded DNS reply validation
+PASS discovery preserves multiple BSS per SSID; APIPA stays hypothesis
+PASS authorized handoff and post-connect validation
+PASS scope rejection, absent adapter, cancellation make no mutation
+PASS one rollback when endpoint verification fails
+PASS failed connection and failed rollback are bounded and preserve timeout
+PASS distribution and incomplete transfer confidence
+PASS experiment waves enforce explicit permission and device independence
+PASS multi-scope codec, hard caps and comparison identity
+PASS rollback must verify Windows state and gateway policy
+PASS cancellation restores only the captured link when rollback is allowed
+PASS 50k logical clients deterministic completion
+SUMMARY 49 passed, 0 failed

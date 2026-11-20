@@ -32,3 +32,10 @@ Run on an interactive Windows 11 x64 machine using only networks you are allowed
 | No profile, location denied, radio disabled | No new profile/credential is invented; Windows settings or a native error is available. |
 
 Record model, driver, Windows build and the observed per-adapter result, omitting credentials. Until run, the rows above are `NOT_TESTED_ON_HARDWARE`.
+
+## 0.4.1 additions
+
+- Run the normal and direct modes independently as a standard user; cover a fresh attempt, missing profile, stale scan, denied location, absent IP, and explicit cancellation. Compare the recorded association/local-link/NLM times with native state observations, not RF timestamps. Check that a competing external association is not intentionally overwritten during recovery.
+- On a driver exposing Dual-STA, compare each returned interface GUID/state and the synchronization flag with the Microsoft Native Wi-Fi sample. Verify opening the inventory does not change the flag. If the driver is absent, record `NOT_TESTED_ON_HARDWARE`, not a zero-capacity verdict.
+- Load an authorized CLP1 scope for a current association. Measure it from Paths without reconnecting. Verify actual source and egress on owned equipment, then repeat on a separately identified second adapter. Verify that changing the BSSID or address during measurement does not credit the sample. This is an endpoint test, not an aggregate throughput test.
+- Use the offline schedulers without a network connection. Confirm that the lab marks its goodput, reordering and retry figures as simulated and that a physical path is not marked active based on the lab.

@@ -1,0 +1,144 @@
+=== debug Linux host ===
+PASS bilingual UI catalog, composed diagnostics and French UTF-8
+PASS display settings round trip, overwrite and corruption fallback
+PASS normal Wi-Fi delegates BSSID selection to Windows without a scope or probes
+PASS direct Wi-Fi assistance works without a normal attempt and prefers an independent idle radio on failure
+PASS assistance preserves a local-only link for sign-in and refuses stale identity and busy radios
+PASS assistance stops when Windows cannot cancel the previous request
+PASS Wi-Fi failures verify rollback and cancellation prevents further attempts
+PASS Healthy
+PASS DHCP pool exhausted
+PASS No DHCP response
+PASS Lease expiry and renewal
+PASS Invalid IP
+PASS Gateway unavailable
+PASS Slow DNS
+PASS DNS unavailable
+PASS Weak signal
+PASS Congestion
+PASS Loss and jitter
+PASS Unstable access
+PASS Logical IP conflict
+PASS No access point
+PASS Association rejected
+PASS Authentication denied
+PASS DHCP renewal retains a slot without restarting DORA
+PASS transition contract
+PASS pool capacity and lease ownership/expiry
+PASS scheduler cancellation and 10k clients
+PASS scenario codec
+PASS capacity profiler budgets
+PASS score bounded, missingness and eligibility
+PASS ranking freshness, cooldown and hysteresis
+PASS handoff ranks only the latest host-validated same-interface evidence
+PASS scope strict validation
+PASS bounded DNS reply validation
+PASS discovery preserves multiple BSS per SSID; APIPA stays hypothesis
+PASS authorized handoff and post-connect validation
+PASS scope rejection, absent adapter, cancellation make no mutation
+PASS one rollback when endpoint verification fails
+PASS failed connection and failed rollback are bounded and preserve timeout
+PASS distribution and incomplete transfer confidence
+PASS experiment waves enforce explicit permission and device independence
+PASS multi-scope codec, hard caps and comparison identity
+PASS rollback must verify Windows state and gateway policy
+PASS cancellation restores only the captured link when rollback is allowed
+PASS 50k logical clients deterministic completion
+SUMMARY 45 passed, 0 failed
+CAMPUSLINK 0.4.0 | 7ad1e93d943e | x64 | Linux | Debug
+PASS: SDL 3002030 runtime, dummy window and quit event
+UI_SMOKE_FRAME_MS count=48 p50=25.459 p95=42.512 capture=off
+PASS: SDL dummy + ImGui software rendering, 12 panels in four language/theme combinations and quit event
+LOGICAL_SIMULATION_CAPACITY | limits: 10000 clients, 32 MiB RSS growth budget, 1500 ms wall, 900 ms process CPU
+clients,transitions,events_per_second,wall_ms,cpu_ms,batch_p95_us,baseline_rss,sampled_peak_rss,sampled_growth,accounted_bytes,status
+1,11,267003.3,0.041,0.041,9.981,2342912,2342912,0,372,PASS
+2,22,691237.0,0.032,0.032,10.667,2342912,2342912,0,744,PASS
+4,44,996399.4,0.044,0.044,22.829,2342912,2342912,0,1488,PASS
+8,88,999069.0,0.088,0.088,60.042,2342912,2342912,0,2976,PASS
+16,176,968176.7,0.182,0.182,117.206,2342912,2342912,0,5952,PASS
+32,352,1073236.2,0.328,0.328,110.052,2342912,2342912,0,11904,PASS
+64,704,949415.3,0.742,0.741,147.017,2342912,2342912,0,23808,PASS
+128,1408,725209.8,1.942,1.942,226.561,2342912,2342912,0,47616,PASS
+256,2816,579588.0,4.859,4.858,226.649,2342912,2342912,0,95232,PASS
+512,5632,670783.6,8.396,8.319,210.210,2342912,4120576,1777664,190464,PASS
+1024,11264,626515.7,17.979,17.979,239.817,2342912,4116480,1773568,380928,PASS
+2048,22528,582282.0,38.689,38.660,261.219,2342912,4382720,2039808,761856,PASS
+4096,45056,533215.2,84.499,84.091,289.632,2342912,4923392,2580480,1523712,PASS
+8192,90112,474382.6,189.956,189.619,329.056,2342912,6004736,3661824,3047424,PASS
+10000,110000,473718.7,232.205,232.045,314.408,2342912,6635520,4292608,3720000,PASS
+maximum_completed_within_budgets=10000 (offline workload, not radio capacity)
+profile_stop=LIMIT_REACHED
+Usage: CampusLink [--version | --self-test | --ui-smoke | --inventory-smoke | --profile | --graphics-smoke | --clp1-loopback PORT]
+ERROR: SDL_Init(video): nonexistent not available
+=== release Linux host ===
+PASS bilingual UI catalog, composed diagnostics and French UTF-8
+PASS display settings round trip, overwrite and corruption fallback
+PASS normal Wi-Fi delegates BSSID selection to Windows without a scope or probes
+PASS direct Wi-Fi assistance works without a normal attempt and prefers an independent idle radio on failure
+PASS assistance preserves a local-only link for sign-in and refuses stale identity and busy radios
+PASS assistance stops when Windows cannot cancel the previous request
+PASS Wi-Fi failures verify rollback and cancellation prevents further attempts
+PASS Healthy
+PASS DHCP pool exhausted
+PASS No DHCP response
+PASS Lease expiry and renewal
+PASS Invalid IP
+PASS Gateway unavailable
+PASS Slow DNS
+PASS DNS unavailable
+PASS Weak signal
+PASS Congestion
+PASS Loss and jitter
+PASS Unstable access
+PASS Logical IP conflict
+PASS No access point
+PASS Association rejected
+PASS Authentication denied
+PASS DHCP renewal retains a slot without restarting DORA
+PASS transition contract
+PASS pool capacity and lease ownership/expiry
+PASS scheduler cancellation and 10k clients
+PASS scenario codec
+PASS capacity profiler budgets
+PASS score bounded, missingness and eligibility
+PASS ranking freshness, cooldown and hysteresis
+PASS handoff ranks only the latest host-validated same-interface evidence
+PASS scope strict validation
+PASS bounded DNS reply validation
+PASS discovery preserves multiple BSS per SSID; APIPA stays hypothesis
+PASS authorized handoff and post-connect validation
+PASS scope rejection, absent adapter, cancellation make no mutation
+PASS one rollback when endpoint verification fails
+PASS failed connection and failed rollback are bounded and preserve timeout
+PASS distribution and incomplete transfer confidence
+PASS experiment waves enforce explicit permission and device independence
+PASS multi-scope codec, hard caps and comparison identity
+PASS rollback must verify Windows state and gateway policy
+PASS cancellation restores only the captured link when rollback is allowed
+PASS 50k logical clients deterministic completion
+SUMMARY 45 passed, 0 failed
+CAMPUSLINK 0.4.0 | 7ad1e93d943e | x64 | Linux | Release
+PASS: SDL 3002030 runtime, dummy window and quit event
+UI_SMOKE_FRAME_MS count=48 p50=25.366 p95=50.443 capture=off
+PASS: SDL dummy + ImGui software rendering, 12 panels in four language/theme combinations and quit event
+LOGICAL_SIMULATION_CAPACITY | limits: 10000 clients, 32 MiB RSS growth budget, 1500 ms wall, 900 ms process CPU
+clients,transitions,events_per_second,wall_ms,cpu_ms,batch_p95_us,baseline_rss,sampled_peak_rss,sampled_growth,accounted_bytes,status
+1,11,604096.9,0.018,0.018,5.060,2338816,2338816,0,372,PASS
+2,22,1824212.3,0.012,0.012,2.362,2338816,2338816,0,744,PASS
+4,44,1175967.5,0.037,0.038,2.617,2338816,2338816,0,1488,PASS
+8,88,4886174.3,0.018,0.018,4.370,2338816,2338816,0,2976,PASS
+16,176,8311295.8,0.021,0.022,6.556,2338816,2338816,0,5952,PASS
+32,352,10587421.4,0.033,0.034,7.835,2338816,2338816,0,11904,PASS
+64,704,11604523.1,0.061,0.061,9.899,2338816,2338816,0,23808,PASS
+128,1408,10926587.0,0.129,0.129,11.283,2338816,2338816,0,47616,PASS
+256,2816,11072185.5,0.254,0.254,11.301,2338816,2338816,0,95232,PASS
+512,5632,8338465.9,0.675,0.676,14.453,2338816,4026368,1687552,190464,PASS
+1024,11264,9236269.4,1.220,1.220,13.317,2338816,4022272,1683456,380928,PASS
+2048,22528,9305326.5,2.421,2.421,13.680,2338816,4288512,1949696,761856,PASS
+4096,45056,8659839.2,5.203,5.202,15.445,2338816,4829184,2490368,1523712,PASS
+8192,90112,7872059.5,11.447,11.400,17.892,2338816,5910528,3571712,3047424,PASS
+10000,110000,8000897.8,13.748,13.748,16.592,2338816,6541312,4202496,3720000,PASS
+maximum_completed_within_budgets=10000 (offline workload, not radio capacity)
+profile_stop=LIMIT_REACHED
+Usage: CampusLink [--version | --self-test | --ui-smoke | --inventory-smoke | --profile | --graphics-smoke | --clp1-loopback PORT]
+ERROR: SDL_Init(video): nonexistent not available
