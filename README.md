@@ -1,10 +1,12 @@
 # CAMPUSLINK
 
-CAMPUSLINK is a Windows x64 Wi-Fi research desktop. It keeps two activities separate: **Virtual Client Lab** simulates logical clients and DHCP entirely offline; **Physical Experiment** uses the host's real Windows WLAN profile only after the operator authorizes an exact test scope. Simulated clients are not radios, and no lease is transferred to the host.
+Assistant de connexion Wi-Fi pour **Windows 11 x64**. À l’accueil, choisissez **Me connecter à un réseau**, sélectionnez un point d’accès et lancez la **Connexion normale** ou la **Connexion assistée directe**. L’assistance ne requiert ni essai normal préalable ni configuration de laboratoire. Windows conserve la gestion des identifiants, du portail et des adresses IP.
 
-## Install and run
+**EN.** CAMPUSLINK is a native Wi-Fi connection assistant. From Home, choose **Connect to Wi-Fi**, select an access point, and choose normal or direct assisted connection. Extract the whole portable ZIP and run `CampusLink.exe` next to `SDL3.dll`. Vulkan is preferred; SDL software rendering is the fallback.
 
-Extract the verified portable ZIP and run `CampusLink.exe` next to `SDL3.dll`. To build from source, install LLVM and Visual Studio C++ Build Tools with a Windows 11 SDK, then prepare the locked dependencies:
+## Build
+
+Use LLVM and Visual Studio C++ Build Tools with a Windows 11 SDK, then prepare the hash-locked dependencies:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\setup-deps.ps1 -InstallPinnedLLVM
@@ -13,14 +15,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\setup-deps.ps1 -
 .\build.bat release-all
 ```
 
-Build logs are under `logs/build/`. The portable ZIP is written to `dist/packages/`; `release-all` also creates a local versioned release. [Build and validation instructions](docs/BUILD_WINDOWS.md) · [Package layout and checksums](docs/BUILD_RELEASE.md).
+Build logs: `logs/build/`. Portable ZIP: `dist/packages/`. [Build](docs/BUILD_WINDOWS.md) · [Distribution and checksums](docs/BUILD_RELEASE.md).
 
-## Use
+## Advanced tools
 
-Start with **Virtual Client Lab** for deterministic offline scenarios. **Hardware Lab** and **Network Discovery** report driver data and unknowns explicitly. To run a real experiment, read the [user guide](docs/USER_GUIDE.md) and configure an authorized private CLP1 endpoint and Windows profile. Vulkan is preferred; SDL software rendering is used if unavailable.
-
-[Architecture](docs/ARCHITECTURE.md) · [Test plan](docs/TEST_PLAN.md) · [Known limitations](docs/KNOWN_LIMITATIONS.md) · [Delivery evidence](docs/reports/FINAL_DELIVERY_REPORT.md) · [Original specification](docs/CAMPUSLINK_SPEC_ARENA.md)
-
-### Candidate 0.2.0
-
-The portable package targets Windows 11 x64. Start with **Me connecter à un réseau** and choose a normal Windows connection or direct assisted connection, independently of the lab. See the [user guide](docs/USER_GUIDE.md). The integrated Lab runs offline; its client count and RSS measurements describe simulation only. Physical trials require exact profile/BSSID and an authorized endpoint. See [Windows 11 acceptance](docs/WINDOWS11_VALIDATION.md) for client, Dell/AX201, Vulkan and WLAN field checks; Windows Server CI does not replace those checks.
+Scoped CLP1 measurements require an explicitly authorized endpoint and profile/BSSID. The Virtual Client Lab and the multipath scheduler lab run offline. Neither simulates real radio capability, and neither forwards Internet traffic. See the [FR/EN user guide](docs/USER_GUIDE.md), [architecture](docs/ARCHITECTURE.md), [transport decision](docs/decisions/0002-connectivity-evidence.md) and [Windows 11 field validation](docs/WINDOWS11_VALIDATION.md).

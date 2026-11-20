@@ -206,6 +206,7 @@ Handoff select(Backend& backend, const Scope& scope, const Bss& candidate, std::
     if (!failure) failure = Error{"handoff", 0, cancelled ? "Operator cancelled the experiment" : "No validated observation"};
     // Cleanup is a single bounded native connection attempt. Cancellation stops all probes
     // and new trials, but does not interrupt restoration of this interface's captured profile.
+    if (failure->request_unsettled) return {"VALIDATION_FAILED", false, std::move(failure), std::move(measured)};
     if (changing && scope.rollback && previous.associated && !previous.profile.empty() && usable_ipv4(previous.address)) {
         const Bss rollback{previous.id, previous.ssid, previous.bssid, {}, previous.profile};
         if (const auto rollback_error = backend.connect(rollback, {})) {
@@ -227,6 +228,32 @@ Handoff select(Backend& backend, const Scope& scope, const Bss& candidate, std::
     }
     return {cancelled ? "CANCELLED" : "VALIDATION_FAILED", false, std::move(failure), std::move(measured)};
 }
+Handoff observe_path(Backend& backend, const Scope& scope, std::string_view interface_id, std::stop_token stop) {
+    if (stop.stop_requested()) return {"CANCELLED", false, {}, {}};
+    const auto before = backend.inspect(stop);
+    const auto* i = find(before, std::string(interface_id));
+    if (stop.stop_requested()) return {"CANCELLED", false, {}, {}};
+    if (!i || !i->wireless || !i->associated || !i->up || !i->index || !usable_ipv4(i->address) || !usable_ipv4(i->gateway))
+        return {"ADAPTER_UNAVAILABLE", false, Error{"validation", 0, "Expected Wi-Fi link and usable IPv4 gateway not confirmed"}, {}};
+    const Bss b{i->id, i->ssid, i->bssid, {}, i->profile};
+    if (!scope.allows(b)) return {"SCOPE_BLOCKED", false, Error{"handoff", 0, "Candidate does not match authorized profile and BSSID"}, {}};
+    const auto started = Clock::now();
+    auto data = backend.measure(*i, scope, stop);
+    if (stop.stop_requested()) return {"CANCELLED", false, {}, {}};
+    const auto after = backend.inspect(stop);
+    if (stop.stop_requested()) return {"CANCELLED", false, {}, {}};
+    const auto* latest = find(after, i->id);
+    if (!latest || !latest->associated || !latest->up || latest->index != i->index || latest->address != i->address ||
+        latest->gateway != i->gateway || latest->ssid != i->ssid || latest->profile != i->profile || latest->bssid != i->bssid ||
+        (!scope.dns_name.empty() && latest->dns != i->dns))
+        return {"VALIDATION_FAILED", false, Error{"validation", 0, "Observed path changed during the measurement"}, {}};
+    Candidate measured{b, std::move(data), {}, Clock::now(), scope.method(), started};
+    measured.host_validated = measured.observation.endpoint_verified && (!scope.require_gateway_reply || measured.observation.gateway_replied) &&
+        (scope.dns_name.empty() || measured.observation.dns_ms.has_value());
+    measured.rating = candidate_score(measured, base_weights);
+    auto error = measured.host_validated ? std::nullopt : measured.observation.error;
+    return {measured.host_validated ? "HOST_VALIDATED" : "VALIDATION_FAILED", false, std::move(error), std::move(measured)};
+}
 namespace {
 bool same_bss(const Bss& a, const Bss& b) {
     return a.interface_id == b.interface_id && a.bssid == b.bssid && a.ssid == b.ssid && a.profile == b.profile &&
@@ -239,65 +266,111 @@ bool matches_wifi(const Interface& i, const Bss& b, bool exact) {
     return i.associated && i.profile == b.profile && i.ssid == b.ssid && (!exact || i.bssid == b.bssid);
 }
 }
-std::vector<Bss> wifi_plan(const Bss& selected, const Discovery& scan, const Snapshot& topology, WifiMode mode) {
-    if (selected.profile.empty() || selected.ssid.empty() || !bssid_format(selected.bssid) ||
+namespace {
+constexpr auto wifi_scan_ttl = std::chrono::minutes(2);
+bool fresh_wifi(const WifiPolicy& policy, Clock::time_point now) {
+    return policy.scanned_at == Clock::time_point{} || (policy.scanned_at <= now && now - policy.scanned_at < wifi_scan_ttl);
+}
+int history_tier(const Bss& b, const WifiPolicy& policy, Clock::time_point now) {
+    const WifiHistory* latest{};
+    for (const auto& h : policy.history) {
+        if (h.observed > now || !same_bss(h.candidate, b) || (latest && latest->observed >= h.observed)) continue;
+        latest = &h;
+    }
+    if (!latest) return 0;
+    const auto age = now - latest->observed;
+    // Only short-lived evidence can override signal. Never extrapolate quality from it.
+    if (latest->success && age < std::chrono::minutes(20)) return 1;
+    if (!latest->success && age < std::chrono::minutes(5)) return -1;
+    return 0;
+}
+}
+std::vector<Bss> wifi_plan(const Bss& selected, const Discovery& scan, const Snapshot& topology, WifiMode mode, WifiPolicy policy, Clock::time_point now) {
+    if (!fresh_wifi(policy, now) || selected.profile.empty() || selected.ssid.empty() || !bssid_format(selected.bssid) ||
         !std::any_of(scan.bss.begin(), scan.bss.end(), [&](const auto& b) { return same_bss(selected, b); })) return {};
     const auto* primary = find(topology, selected.interface_id);
     if (!primary || !primary->wireless) return {};
     if (mode == WifiMode::normal) return {selected};
-    std::vector<Bss> idle, primary_alternatives;
+    struct Choice { const Bss* b; bool independent; int history; };
+    std::vector<Choice> alternatives;
     for (const auto& b : scan.bss) {
         if (b.profile != selected.profile || b.ssid != selected.ssid || b.security != selected.security || !b.infrastructure ||
             !bssid_format(b.bssid) || same_bss(b, selected)) continue;
         const auto* adapter = find(topology, b.interface_id);
         if (!adapter || !adapter->wireless) continue;
-        if (adapter->id == primary->id) primary_alternatives.push_back(b);
-        else if (adapter->hardware_interface && primary->hardware_interface && adapter->wlan_idle && !adapter->associated && !adapter->device_instance.empty() &&
-                 !primary->device_instance.empty() && adapter->device_instance != primary->device_instance) idle.push_back(b);
+        const bool independent = adapter->id != primary->id;
+        if (independent && (!adapter->hardware_interface || !primary->hardware_interface || !adapter->wlan_idle || adapter->associated ||
+            adapter->device_instance.empty() || primary->device_instance.empty() || adapter->device_instance == primary->device_instance)) continue;
+        alternatives.push_back({&b, independent, history_tier(b, policy, now)});
     }
-    const auto preferred = [](const Bss& a, const Bss& b) {
-        if (a.rssi != b.rssi) return a.rssi > b.rssi;
-        return std::tie(a.interface_id, a.bssid) < std::tie(b.interface_id, b.bssid);
-    };
-    std::sort(idle.begin(), idle.end(), preferred);
-    std::sort(primary_alternatives.begin(), primary_alternatives.end(), preferred);
-    if (!idle.empty()) return {selected, idle.front()};
-    if (!primary_alternatives.empty()) return {selected, primary_alternatives.front()};
-    return {selected};
+    std::sort(alternatives.begin(), alternatives.end(), [](const Choice& a, const Choice& b) {
+        if (a.history != b.history) return a.history > b.history;
+        if (a.independent != b.independent) return a.independent;
+        if (a.b->rssi != b.b->rssi) return a.b->rssi > b.b->rssi;
+        return std::tie(a.b->interface_id, a.b->bssid) < std::tie(b.b->interface_id, b.b->bssid);
+    });
+    std::vector<Bss> plan{selected};
+    for (const auto& c : alternatives) {
+        if (plan.size() >= std::clamp(policy.max_attempts, 1u, wifi_max_attempts)) break;
+        if (std::none_of(plan.begin(), plan.end(), [&](const auto& p) { return same_bss(p, *c.b); })) plan.push_back(*c.b);
+    }
+    return plan;
 }
-WifiResult connect_wifi(Backend& backend, const Bss& selected, const Discovery& scan, WifiMode mode, std::stop_token stop) {
+WifiResult connect_wifi(Backend& backend, const Bss& selected, const Discovery& scan, WifiMode mode, std::stop_token stop, WifiPolicy policy) {
+    const auto start = Clock::now();
     WifiResult result;
-    if (stop.stop_requested()) { result.status = WifiStatus::cancelled; return result; }
+    const auto finish = [&](WifiStatus status) {
+        result.finished = Clock::now();
+        result.elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(result.finished - start);
+        result.status = status;
+        return std::move(result);
+    };
+    if (stop.stop_requested()) return finish(WifiStatus::cancelled);
+    if (!fresh_wifi(policy, start)) return finish(WifiStatus::invalid);
     const auto topology = backend.inspect(stop);
-    const auto plan = wifi_plan(selected, scan, topology, mode);
-    if (stop.stop_requested()) { result.status = WifiStatus::cancelled; return result; }
-    if (plan.empty()) return result;
+    const auto plan = wifi_plan(selected, scan, topology, mode, policy, start);
+    if (stop.stop_requested()) return finish(WifiStatus::cancelled);
+    if (plan.empty()) return finish(WifiStatus::invalid);
+    // An operation may restore at most one displaced link. If a later mutation
+    // would require another restoration, skip it rather than overspend the budget.
     const bool exact = mode == WifiMode::assisted;
     for (const auto& trial : plan) {
+        if (stop.stop_requested()) return finish(WifiStatus::cancelled);
+        if (!fresh_wifi(policy, Clock::now())) return finish(WifiStatus::invalid);
         const auto before = backend.inspect(stop);
         const auto* previous = find(before, trial.interface_id);
-        if (stop.stop_requested()) { result.status = WifiStatus::cancelled; return result; }
+        if (stop.stop_requested()) return finish(WifiStatus::cancelled);
         if (!previous || !previous->wireless) continue;
         if (trial.interface_id != selected.interface_id) {
             const auto* primary = find(before, selected.interface_id);
             if (previous->associated || !previous->wlan_idle || !primary || !primary->hardware_interface || !previous->hardware_interface ||
                 previous->device_instance.empty() || primary->device_instance.empty() || previous->device_instance == primary->device_instance) continue;
         }
+        if (!fresh_wifi(policy, Clock::now())) return finish(WifiStatus::invalid);
         const bool mutation = !(usable_link(*previous) && matches_wifi(*previous, trial, exact));
-        auto failure = mutation ? (exact ? backend.connect(trial, stop) : backend.connect_profile(trial, stop)) : std::nullopt;
+        if (mutation && previous->associated && result.recovery_attempted) continue;
+        const auto tier = history_tier(trial, policy, start);
+        const auto reason = same_bss(trial, selected) ? WifiReason::selected : tier > 0 ? WifiReason::previous_success :
+            tier < 0 ? WifiReason::avoid_recent_failure : trial.interface_id != selected.interface_id ? WifiReason::independent_idle : WifiReason::signal;
+        WifiAttempt attempt{trial, {}, {}, reason};
+        const auto attempted_at = Clock::now();
+        if (mutation) attempt.error = backend.request_wifi(trial, mode, stop, attempt.timing);
+        auto& failure = attempt.error;
         const auto after = backend.inspect(stop);
         const auto* linked = find(after, trial.interface_id);
         if (!failure && !stop.stop_requested() && linked && usable_link(*linked) && matches_wifi(*linked, trial, exact)) {
             result.evidence = backend.reachability(*linked);
-            result.attempts.push_back({trial, {}});
+            if (result.evidence == Reachability::internet)
+                attempt.timing.internet_reported = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - attempted_at);
+            result.attempts.push_back(std::move(attempt));
             result.link = *linked;
-            result.status = result.evidence == Reachability::internet ? WifiStatus::internet_reported : WifiStatus::local_link;
-            return result; // Keep even a local-only link for Windows/portal sign-in. Never try other credentials.
+            return finish(result.evidence == Reachability::internet ? WifiStatus::internet_reported : WifiStatus::local_link); // Keep even a local-only link for Windows/portal sign-in. Never try other credentials.
         }
-        if (!failure && !stop.stop_requested()) failure = Error{"validation", 0, "Expected Wi-Fi link and usable IPv4 gateway not confirmed"};
+        if (!failure && !stop.stop_requested()) failure = Error{"validation", 0, "Expected Wi-Fi link and usable IPv4 gateway not confirmed", false,
+            linked && matches_wifi(*linked, trial, exact) ? WifiFailure::ip_unconfirmed : WifiFailure::association_unconfirmed};
         const bool unsettled = failure && failure->request_unsettled;
-        result.attempts.push_back({trial, std::move(failure)});
-        if (unsettled) { result.status = WifiStatus::request_unsettled; return result; }
+        result.attempts.push_back(std::move(attempt));
+        if (unsettled) return finish(WifiStatus::request_unsettled);
         if (mutation && usable_link(*previous) && bssid_format(previous->bssid) && !previous->profile.empty()) {
             const Bss restore{previous->id, previous->ssid, previous->bssid, {}, previous->profile};
             auto recovery = backend.inspect({});
@@ -306,16 +379,19 @@ WifiResult connect_wifi(Backend& backend, const Bss& selected, const Discovery& 
                 return old && usable_link(*old) && matches_wifi(*old, restore, true);
             };
             if (!recovered()) {
+                const auto* current = find(recovery, previous->id);
+                if (current && current->associated && !matches_wifi(*current, restore, true) && !matches_wifi(*current, trial, exact))
+                    return finish(WifiStatus::recovery_failed); // Do not override an observed external change.
+                result.recovery_attempted = true;
                 const auto error = backend.connect(restore, {});
                 recovery = backend.inspect({});
-                if (error || !recovered()) { result.status = WifiStatus::recovery_failed; return result; }
+                if (error || !recovered()) return finish(WifiStatus::recovery_failed);
             }
             result.restored = true;
         }
-        if (stop.stop_requested()) { result.status = WifiStatus::cancelled; return result; }
+        if (stop.stop_requested()) return finish(WifiStatus::cancelled);
     }
-    result.status = WifiStatus::failed;
-    return result;
+    return finish(WifiStatus::failed);
 }
 
 }

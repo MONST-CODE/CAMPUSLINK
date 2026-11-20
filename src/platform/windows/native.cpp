@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <numeric>
 #include <thread>
@@ -228,14 +229,28 @@ Snapshot snapshot(std::stop_token stop, bool details = true) {
             if (const auto mfp = query<BOOL>(wlan.value, info.InterfaceGuid, wlan_intf_opcode_management_frame_protection_capable, status))
                 match->mfp_capable = *mfp != FALSE;
             if (const auto ch = query<ULONG>(wlan.value, info.InterfaceGuid, wlan_intf_opcode_channel_number, status)) match->channel = *ch;
-            // No documented public layout for the returned secondary-STA blob: keep status/size, not a guessed count.
+            // Microsoft documents WLAN_INTERFACE_INFO_LIST for this opcode.
             void* payload{}; DWORD bytes{};
             const auto rc = WlanQueryInterface(wlan.value, &info.InterfaceGuid, wlan_intf_opcode_secondary_sta_interfaces,
                 nullptr, &bytes, &payload, nullptr);
-            if (payload) WlanFreeMemory(payload);
-            match->secondary_sta_reported = rc == ERROR_SUCCESS;
-            match->secondary_sta_bytes = rc == ERROR_SUCCESS ? bytes : 0;
+            const WlanPtr<WLAN_INTERFACE_INFO_LIST> secondary(static_cast<WLAN_INTERFACE_INFO_LIST*>(payload));
+            constexpr auto header = offsetof(WLAN_INTERFACE_INFO_LIST, InterfaceInfo);
             if (rc) match->secondary_sta_query = fail("WlanQueryInterface(secondary STA)", rc);
+            else if (!secondary || bytes < header || secondary->dwNumberOfItems > (bytes - header) / sizeof(WLAN_INTERFACE_INFO) ||
+                     secondary->dwNumberOfItems > 64) {
+                match->secondary_sta_query = fail("WlanQueryInterface(secondary STA)", ERROR_INVALID_DATA);
+            } else {
+                match->secondary_sta_reported = true;
+                match->secondary_sta_bytes = bytes;
+                const auto* entries = reinterpret_cast<const std::byte*>(secondary.get()) + header;
+                for (DWORD j = 0; j < secondary->dwNumberOfItems; ++j) {
+                    WLAN_INTERFACE_INFO entry{};
+                    std::memcpy(&entry, entries + j * sizeof entry, sizeof entry);
+                    match->secondary_sta.push_back({guid_text(entry.InterfaceGuid), static_cast<unsigned>(entry.isState)});
+                }
+            }
+            if (const auto sync = query<BOOL>(wlan.value, info.InterfaceGuid, wlan_intf_opcode_secondary_sta_synchronized_connections, status))
+                match->secondary_synchronized = *sync != FALSE;
         }
         if (info.isState == wlan_interface_state_connected) {
             DWORD status{};
@@ -455,7 +470,12 @@ public:
     std::optional<Error> connect(const Bss& b, std::stop_token stop) override { return join(b, true, stop); }
     std::optional<Error> connect_profile(const Bss& b, std::stop_token stop) override { return join(b, false, stop); }
 private:
-    std::optional<Error> join(const Bss& b, bool exact, std::stop_token stop) {
+    std::optional<Error> request_wifi(const Bss& b, WifiMode mode, std::stop_token stop, WifiTiming& timing) override {
+        return join(b, mode == WifiMode::assisted, stop, &timing);
+    }
+    std::optional<Error> join(const Bss& b, bool exact, std::stop_token stop, WifiTiming* timing = nullptr) {
+        const auto start = Clock::now();
+        const auto elapsed = [&] { return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start); };
         if (stop.stop_requested()) return Error{"WlanConnect", ERROR_CANCELLED, "Cancelled before connection"};
         Wlan wlan;
         std::vector<Error> errors;
@@ -476,21 +496,41 @@ private:
                 if (parsed.ec != std::errc{} || parsed.ptr != start + 2 || (k < 5 && start[2] != ':')) return fail("BSSID selection", ERROR_INVALID_DATA);
                 desired.BSSIDs[0][k] = static_cast<UCHAR>(value);
             }
-            WLAN_CONNECTION_PARAMETERS params{wlan_connection_mode_profile, profile, nullptr, exact ? &desired : nullptr, dot11_BSS_type_infrastructure, 0};
+            DOT11_SSID target_ssid{};
+            // Reverse label() losslessly, so a profile listing multiple SSIDs cannot
+            // silently try a different name from the one explicitly selected.
+            const std::string_view ssid = b.ssid;
+            for (std::size_t j = 0; j < ssid.size();) {
+                if (target_ssid.uSSIDLength == DOT11_SSID_MAX_LENGTH) return fail("SSID", ERROR_INVALID_DATA);
+                unsigned value = static_cast<unsigned char>(ssid[j++]);
+                if (value == '\\') {
+                    if (j + 3 > ssid.size() || ssid[j++] != 'x') return fail("SSID", ERROR_INVALID_DATA);
+                    const auto parsed = std::from_chars(ssid.data() + j, ssid.data() + j + 2, value, 16);
+                    if (parsed.ec != std::errc{} || parsed.ptr != ssid.data() + j + 2) return fail("SSID", ERROR_INVALID_DATA);
+                    j += 2;
+                }
+                target_ssid.ucSSID[target_ssid.uSSIDLength++] = static_cast<UCHAR>(value);
+            }
+            WLAN_CONNECTION_PARAMETERS params{wlan_connection_mode_profile, profile, target_ssid.uSSIDLength ? &target_ssid : nullptr,
+                exact ? &desired : nullptr, dot11_BSS_type_infrastructure, 0};
             const auto code = WlanConnect(wlan.value, &info.InterfaceGuid, &params, nullptr);
-            if (code) return fail("WlanConnect", code);
+            if (code) { auto e = fail("WlanConnect", code); e.wifi_failure = WifiFailure::request; return e; }
             const auto end = Clock::now() + 15s;
             std::string last_ip, last_gateway;
             bool saw_association{};
             while (Clock::now() < end && !stop.stop_requested()) {
                 const auto current = snapshot(stop, false);
                 const auto match = std::find_if(current.interfaces.begin(), current.interfaces.end(), [&](const auto& item) {
-                    return equal_id(item.id, b.interface_id) && item.associated && item.profile == b.profile && (exact ? item.bssid == b.bssid : item.ssid == b.ssid);
+                    return equal_id(item.id, b.interface_id) && item.associated && item.profile == b.profile && (b.ssid.empty() || item.ssid == b.ssid) && (!exact || item.bssid == b.bssid);
                 });
                 if (match != current.interfaces.end()) {
+                    if (timing && !timing->association) timing->association = elapsed();
                     saw_association = true;
                     if (usable_ipv4(match->address) && usable_ipv4(match->gateway)) {
-                        if (match->address == last_ip && match->gateway == last_gateway) return {};
+                        if (match->up && match->address == last_ip && match->gateway == last_gateway) {
+                            if (timing) timing->usable = elapsed();
+                            return {};
+                        }
                         last_ip = match->address; last_gateway = match->gateway;
                     } else { last_ip.clear(); last_gateway.clear(); }
                 } else { last_ip.clear(); last_gateway.clear(); }
@@ -505,18 +545,34 @@ private:
             const bool another_link = live != latest.interfaces.end() && live->associated &&
                 (live->profile != b.profile || live->ssid != b.ssid || (exact && live->bssid != b.bssid));
             const bool idle = live != latest.interfaces.end() && live->wlan_idle;
-            if (!another_link && !idle) {
+            if (!another_link && (!idle || stop.stop_requested())) {
                 const auto disconnect = WlanDisconnect(wlan.value, &info.InterfaceGuid, nullptr);
                 if (disconnect != ERROR_SUCCESS) {
                     auto e = fail("WlanDisconnect", disconnect);
                     e.request_unsettled = true;
                     return e;
                 }
+                const auto cleanup_until = Clock::now() + 2s;
+                bool settled{};
+                do {
+                    const auto state = snapshot({}, false);
+                    const auto adapter = std::find_if(state.interfaces.begin(), state.interfaces.end(), [&](const auto& item) {
+                        return equal_id(item.id, b.interface_id);
+                    });
+                    if (adapter != state.interfaces.end() && (adapter->wlan_idle || (adapter->associated &&
+                        (adapter->profile != b.profile || adapter->ssid != b.ssid || (exact && adapter->bssid != b.bssid))))) {
+                        settled = true;
+                        break;
+                    }
+                    std::this_thread::sleep_for(100ms);
+                } while (Clock::now() < cleanup_until);
+                if (!settled) return Error{"WlanDisconnect", ERROR_TIMEOUT, "Windows did not confirm Wi-Fi request cleanup", true};
             }
             if (stop.stop_requested()) return fail("WlanConnect cancelled", ERROR_CANCELLED);
             return Error{"WlanConnect", ERROR_TIMEOUT, saw_association ?
                 "Association observed but Windows did not stabilize usable IPv4 and gateway within 15 s" :
-                exact ? "Windows did not confirm requested profile/BSSID within 15 s" : "Windows did not confirm requested profile/SSID within 15 s"};
+                exact ? "Windows did not confirm requested profile/BSSID within 15 s" : "Windows did not confirm requested profile/SSID within 15 s",
+                false, saw_association ? WifiFailure::ip_unconfirmed : WifiFailure::association_unconfirmed};
         }
         return fail("WlanConnect interface", ERROR_NOT_FOUND);
     }

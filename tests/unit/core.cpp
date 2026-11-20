@@ -1,4 +1,5 @@
 #include "campuslink/network.hpp"
+#include "campuslink/path_lab.hpp"
 #include "campuslink/ui_text.hpp"
 #include "campuslink/dns.hpp"
 #include "campuslink/simulation.hpp"
@@ -34,6 +35,7 @@ struct Mock final : net::Backend {
     net::Interface interface;
     bool absent{}, failure{}, connect_fail{}, rollback_fail{}, rollback_wrong_route{};
     unsigned connections{}, scans{}, probes{};
+    bool roam_in_measure{};
     std::stop_source* cancel_in_measure{};
     Mock() {
         interface.id = "wifi0"; interface.up = interface.associated = interface.wireless = true; interface.kind = "Physical (reported)";
@@ -52,7 +54,7 @@ struct Mock final : net::Backend {
     }
     std::optional<net::Error> connect_profile(const net::Bss& b, std::stop_token stop) override { return connect(b, stop); }
     net::Observation measure(const net::Interface&, const net::Scope&, std::stop_token) override {
-        ++probes; if (cancel_in_measure) cancel_in_measure->request_stop();
+        ++probes; if (roam_in_measure) interface.bssid = "02:00:00:00:00:03"; if (cancel_in_measure) cancel_in_measure->request_stop();
         auto o = good(); o.endpoint_verified = !failure; return o;
     }
 };
@@ -173,6 +175,62 @@ int main() {
         auto token = std::make_unique<std::stop_source>(); token->request_stop();
         const auto stopped = net::connect_wifi(b, target, {{target}, {}}, net::WifiMode::assisted, token->get_token());
         require(stopped.status == net::WifiStatus::cancelled && b.pinned == 3, "cancelled run made an attempt");
+    });
+    check("Wi-Fi budget is clamped, alternatives deduplicated, expired scans do not mutate", [] {
+        WifiMock b; b.topology.interfaces = {wifi_interface("wifi0", "radio0")}; b.fail_all = true;
+        net::Discovery scan{{target}, {}};
+        for (const char suffix : {'3', '4', '5', '6', '7'}) { auto c = target; c.bssid.back() = suffix; scan.bss.push_back(c); scan.bss.push_back(c); }
+        const auto now = net::Clock::now();
+        const auto expired = net::connect_wifi(b, target, scan, net::WifiMode::assisted, {}, {4, now - 2min});
+        require(expired.status == net::WifiStatus::invalid && b.pinned == 0, "expired scan mutated adapter");
+        require(net::wifi_plan(target, scan, b.topology, net::WifiMode::assisted, {0, now}, now).size() == 1, "minimum budget invalid");
+        const auto hard = net::connect_wifi(b, target, scan, net::WifiMode::assisted, {}, {500, now});
+        require(hard.status == net::WifiStatus::failed && hard.attempts.size() == 4 && b.pinned == 4, "attempt bound not respected");
+        require(std::adjacent_find(hard.attempts.begin(), hard.attempts.end(), [](const auto& a, const auto& b) {
+            return a.candidate.bssid == b.candidate.bssid;
+        }) == hard.attempts.end(), "duplicate candidate attempted");
+    });
+    check("Wi-Fi ranking uses fresh targeted evidence and ignores old or future observations", [] {
+        WifiMock b; b.topology.interfaces = {wifi_interface("wifi0", "radio0")};
+        auto weak = target, strong = target; weak.bssid.back() = '3'; weak.rssi = -80; strong.bssid.back() = '4'; strong.rssi = -50;
+        const net::Discovery scan{{target, weak, strong}, {}};
+        const auto now = net::Clock::now();
+        std::array history{net::WifiHistory{weak, now - 3min, true}, net::WifiHistory{weak, now + 1min, false}};
+        require(net::wifi_plan(target, scan, b.topology, net::WifiMode::assisted, {3, now, history}, now)[1].bssid == weak.bssid, "fresh success not preferred");
+        require(net::wifi_plan(target, scan, b.topology, net::WifiMode::assisted, {3, now + 21min, history}, now + 21min)[1].bssid == strong.bssid, "expired evidence retained");
+        history[1] = {weak, now - 1min, false};
+        require(net::wifi_plan(target, scan, b.topology, net::WifiMode::assisted, {3, now, history}, now)[1].bssid == strong.bssid, "new failure did not suppress older success");
+    });
+    check("read-only path measurement requires approved identity and rejects roaming", [] {
+        Mock b;
+        const auto scope = net::parse_scope(scope_text);
+        b.interface.index = 17;
+        require(net::observe_path(b, scope, b.interface.id, {}).state == "SCOPE_BLOCKED" && b.probes == 0, "unauthorized probe");
+        b.interface.bssid = target.bssid; b.interface.profile = target.profile;
+        auto good_path = net::observe_path(b, scope, b.interface.id, {});
+        require(good_path.measured && good_path.measured->host_validated && b.connections == 0 && b.probes == 1, "path not verified without reconnecting");
+        b.roam_in_measure = true;
+        auto moved = net::observe_path(b, scope, b.interface.id, {});
+        require(!moved.measured && moved.state == "VALIDATION_FAILED" && b.connections == 0, "roaming sample attributed to wrong path");
+    });
+    check("offline schedulers bound reorder window, recover segments and respect shared capacity", [] {
+        const auto original = lab::Scenario{{lab::Path{23, 1900, 0, 5}, lab::Path{110, 1450, 0, 20}}, 0, 128};
+        for (unsigned scenario = 0; scenario < 3; ++scenario) {
+            auto model = original;
+            if (scenario == 1) model.shared_kib_per_second = 1500;
+            if (scenario == 2) { model.paths[0].loss_every = 7; model.paths[0].outage_start_ms = 220; model.paths[0].outage_end_ms = 1350; }
+            for (auto scheduler : {lab::Scheduler::best_single, lab::Scheduler::round_robin, lab::Scheduler::earliest_finish}) {
+                const auto result = lab::compare(model, scheduler);
+                require(result.valid && result.completed == model.segments && result.peak_buffer <= 15, "invalid model completion/window");
+                if (scenario == 1) require(result.mbps <= 1500 * 1024 * 8 / 1e6, "shared model exceeded capacity");
+                if (scenario == 2 && scheduler != lab::Scheduler::best_single)
+                    require(result.retries && result.delivered[0] && result.delivered[1], "multipath model did not exercise loss and recovery");
+                std::cout << "PATH_MODEL," << scenario << ',' << static_cast<unsigned>(scheduler) << ',' <<
+                    result.elapsed_ms << ',' << result.mbps << ',' << result.retries << ',' << result.reordered << '\n';
+            }
+        }
+        auto invalid = original; invalid.segments = 4097;
+        require(!lab::compare(invalid, lab::Scheduler::round_robin).valid, "invalid scenario accepted");
     });
     for (const auto& [s, expected] : std::array{
         std::pair{Scenario::healthy, State::online}, std::pair{Scenario::pool, State::exhausted},

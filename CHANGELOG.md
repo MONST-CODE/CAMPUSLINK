@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1 — Connectivity evidence and path experiments
+
+- Configurable bounded assistance with expiring session history, attempt explanations and separate association/IP/OS Internet evidence.
+- Read-only decoding of the documented Windows Dual-STA interface list and synchronization state.
+- Per-interface scoped endpoint measurement without reconnecting, plus a separate offline scheduler lab for capacity, shared bottleneck and outage scenarios.
+- Avoid redundant idle UI snapshot copies; preserve software/Vulkan rendering and correct the portable quick start.
+
 ## 0.4.0 — Wi-Fi connection assistant
 
 - Home starts with Wi-Fi discovery and gives a choice of two independent connection modes without a lab scope.
