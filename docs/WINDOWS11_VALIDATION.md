@@ -32,3 +32,29 @@ Run on an interactive Windows 11 x64 machine using only networks you are allowed
 | No profile, location denied, radio disabled | No new profile/credential is invented; Windows settings or a native error is available. |
 
 Record model, driver, Windows build and the observed per-adapter result, omitting credentials. Until run, the rows above are `NOT_TESTED_ON_HARDWARE`.
+
+## 0.4.1 additions
+
+- Run the normal and direct modes independently as a standard user; cover a fresh attempt, missing profile, stale scan, denied location, absent IP, and explicit cancellation. Compare the recorded association/local-link/NLM times with native state observations, not RF timestamps. Check that a competing external association is not intentionally overwritten during recovery.
+- On a driver exposing Dual-STA, compare each returned interface GUID/state and the synchronization flag with the Microsoft Native Wi-Fi sample. Verify opening the inventory does not change the flag. If the driver is absent, record `NOT_TESTED_ON_HARDWARE`, not a zero-capacity verdict.
+- Load an authorized CLP1 scope for a current association. Measure it from Paths without reconnecting. Verify actual source and egress on owned equipment, then repeat on a separately identified second adapter. Verify that changing the BSSID or address during measurement does not credit the sample. This is an endpoint test, not an aggregate throughput test.
+- Use the offline schedulers without a network connection. Confirm that the lab marks its goodput, reordering and retry figures as simulated and that a physical path is not marked active based on the lab.
+
+## 0.4.2 additions
+
+Run as a standard user on the Dell/AX201 (or another named adapter). Record Windows build, driver version and, for each row, the result shown by CAMPUSLINK next to `netsh wlan show interfaces` and `ipconfig`. Never record passwords. Rows not run stay `NOT_TESTED_ON_HARDWARE`. Executed so far (2026-11-20): rows 1 (campus, recent-list fallback), 2 (normal and assisted) and a variant of 7 (out-of-range saved network, previous link restored) — see [FIELD_0.4.2](reports/FIELD_0.4.2.md).
+
+| # | Scenario | Expected behaviour |
+|---|---|---|
+| 1 | Dense site, press **Search for networks** | Networks grouped by name; if Windows does not confirm the scan within 8 s, the *recent networks* banner appears and the list is not empty when `netsh wlan show networks` lists networks. |
+| 2 | Normal connection to a saved network that is in range | Steps Preparation → Association → IP address → Internet; *Connected* with association/address/Internet timings in **Details**. |
+| 3 | Slow DHCP (busy network, or DHCP server delayed on owned equipment) | No disconnection by CAMPUSLINK; *Associated, address pending* if no address after 40 s; Windows later completes or reports the issue. With a previously usable link on the same adapter, that link is restored instead. |
+| 4 | Wrong saved password (owned network) | *Connection failed* with cause **Authentication** and the Windows message; assisted mode does **not** try other access points. |
+| 5 | Selected AP switched off or out of range, other AP of the same network available (assisted) | Cause **Radio / association**; the next access point is tried; result on the alternative. |
+| 6 | Captive portal | *Sign-in required* (or *Internet not confirmed* if Windows does not flag WEBHIJACK); **Open the sign-in page** opens the Windows probe URL; the association is kept. |
+| 7 | Switch from network A to B, B fails | Confirmation dialog before the switch; after failure, A is restored and *Your previous connection was restored* is shown. |
+| 8 | **Cancel** during association / during address | No further attempt; previous link restored when it was displaced. |
+| 9 | Minimize for 60 s, then restore | Process CPU near zero while minimized (Task Manager); window redraws immediately on restore. |
+| 10 | Assisted recommendation | With a 2.4 GHz and a 5 GHz AP of the same saved network, the *Recommended* access point follows the documented rule and its reason is displayed. |
+
+Developer evidence for UI layout comes from `CampusLink.exe --ui-smoke` with `CAMPUSLINK_CAPTURE_DIR` (sample-data badge on fixture states). `CAMPUSLINK_CAPTURE_LIVE=1` adds one page rendered from a real read-only inventory and scan; those images show nearby networks and must not be published.

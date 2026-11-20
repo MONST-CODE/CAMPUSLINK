@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.2 — Reliable connection assistant and new workspace
+
+- Slow DHCP no longer causes a disconnection: separate association (25 s) and address (40 s) budgets; the association is kept (*address pending*) unless a usable previous link must be restored.
+- Failures classified from Windows WLAN reason codes (authentication, profile, radio, address, request) with Windows' message; assisted mode tries other access points only after radio/association failures.
+- Internet report polled until Windows concludes (≤ 12 s); captive portals detected (NCSI WEBHIJACK) with an *Open the sign-in page* action.
+- Scans no longer come back empty on busy sites: networks heard in the last two minutes are used when a fresh scan is not confirmed.
+- New *Wi-Fi connection* workspace: networks grouped by name, current connection, explained modes, recommended start access point, engine-driven progress, actionable verdicts. Design system with separate light/dark themes; lab pages grouped.
+- Minimized idle CPU: 99.7 % → 0.6 % of a core. Audit report, ADR 0003, 0.4.2 hardware checklist. Unit tests 56.
+
+## 0.4.1 — Connectivity evidence and path experiments
+
+- Configurable bounded assistance with expiring session history, attempt explanations and separate association/IP/OS Internet evidence.
+- Read-only decoding of the documented Windows Dual-STA interface list and synchronization state.
+- Per-interface scoped endpoint measurement without reconnecting, plus a separate offline scheduler lab for capacity, shared bottleneck and outage scenarios.
+- Avoid redundant idle UI snapshot copies; preserve software/Vulkan rendering and correct the portable quick start.
+
 ## 0.4.0 — Wi-Fi connection assistant
 
 - Home starts with Wi-Fi discovery and gives a choice of two independent connection modes without a lab scope.
