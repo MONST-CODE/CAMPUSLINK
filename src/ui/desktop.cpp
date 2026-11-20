@@ -601,6 +601,7 @@ struct Screen {
     std::string start_bssid;        // assisted start access point (bssid + interface)
     std::string start_interface;
     bool fixture{};                 // smoke rendering with sample data; never set in normal use
+    bool switch_requested{}, trial_requested{}; // deferred OpenPopup (see request/start_wifi)
 
     sim::Config config;
     sim::Budget budget;
@@ -613,7 +614,7 @@ struct Screen {
     void request(std::vector<net::Experiment> experiments, bool from_queue = false) {
         confirmation_queue = from_queue;
         confirmation = std::move(experiments);
-        ImGui::OpenPopup("###physical_confirmation");
+        trial_requested = true;
         consent = false;
     }
     void open_windows_wifi() {
@@ -635,7 +636,7 @@ struct Screen {
         const auto* active = active_wifi();
         const bool disruptive = active && active->id == target.interface_id && !(active->ssid == target.ssid && active->profile == target.profile);
         wifi_mode = mode;
-        if (disruptive) { wifi_confirmation = target; ImGui::OpenPopup("###wifi_switch"); return; }
+        if (disruptive) { wifi_confirmation = target; switch_requested = true; return; }
         worker.wifi(target, mode);
     }
 
@@ -924,10 +925,10 @@ struct Screen {
             ImGui::EndDisabled();
             if (ready_in > 0 && !worker.busy()) { ImGui::SameLine(); ImGui::AlignTextToFramePadding(); w::caption(c, format(tr(Key::AvailableIn), static_cast<int>(ready_in)), false); }
         }
-        switch_dialog(worker);
         w::end_card();
     }
     void switch_dialog(Worker& worker) {
+        if (switch_requested) { ImGui::OpenPopup("###wifi_switch"); switch_requested = false; }
         const auto& c = colors();
         const std::string title = std::string(tr(Key::SwitchTitle)) + "###wifi_switch";
         const auto* vp = ImGui::GetMainViewport();
@@ -1082,6 +1083,7 @@ struct Screen {
             w::gap(space::md);
             if (chosen) selection_card(worker, *chosen, fresh);
         }
+        switch_dialog(worker);
     }
 
     void about() {
@@ -1558,6 +1560,7 @@ struct Screen {
                 }
             }
             w::end_card();
+            if (trial_requested) { ImGui::OpenPopup("###physical_confirmation"); trial_requested = false; }
             const std::string modal_title = std::string(tr(Key::ConfirmExperiment)) + "###physical_confirmation";
             ImGui::SetNextWindowSizeConstraints({std::min(450 * dpi, vp->WorkSize.x), 0}, {std::min(640 * dpi, vp->WorkSize.x), vp->WorkSize.y});
             if (ImGui::BeginPopupModal(modal_title.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
