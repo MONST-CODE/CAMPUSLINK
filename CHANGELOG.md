@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.5.0 — Connection-first: memory, strategists and link watch
+
+- Per-environment memory (local, user-clearable): CAMPUSLINK remembers, per network, the access point that worked, whether a sign-in was needed and typical timings, and starts from what worked next time. A "Known network" badge, a sign-in hint and a "forget" control expose it.
+- Candidate selection folds persistent memory, fresh session evidence, signal/band and channel density (AP count) into one explainable order; each attempt shows why its access point was chosen.
+- Optional multi-access-point sweep for crowded public networks (bounded), opt-in per connection.
+- Optional link-quality watch on a separate thread: on a weak link it *proposes* (never forces) a clearly stronger access point of the same network; dismissable with a cooldown. No active probing.
+- ADR 0004 documents this and keeps path aggregation and a self-hosted gateway as deferred, documented tracks. Unit tests 60; catalog 638 keys.
+
+## 0.4.2 — Reliable connection assistant and new workspace
+
+- Slow DHCP no longer causes a disconnection: separate association (25 s) and address (40 s) budgets; the association is kept (*address pending*) unless a usable previous link must be restored.
+- Failures classified from Windows WLAN reason codes (authentication, profile, radio, address, request) with Windows' message; assisted mode tries other access points only after radio/association failures.
+- Internet report polled until Windows concludes (≤ 12 s); captive portals detected (NCSI WEBHIJACK) with an *Open the sign-in page* action.
+- Scans no longer come back empty on busy sites: networks heard in the last two minutes are used when a fresh scan is not confirmed.
+- New *Wi-Fi connection* workspace: networks grouped by name, current connection, explained modes, recommended start access point, engine-driven progress, actionable verdicts. Design system with separate light/dark themes; lab pages grouped.
+- Minimized idle CPU: 99.7 % → 0.6 % of a core. Audit report, ADR 0003, 0.4.2 hardware checklist. Unit tests 56.
+
+## 0.4.1 — Connectivity evidence and path experiments
+
+- Configurable bounded assistance with expiring session history, attempt explanations and separate association/IP/OS Internet evidence.
+- Read-only decoding of the documented Windows Dual-STA interface list and synchronization state.
+- Per-interface scoped endpoint measurement without reconnecting, plus a separate offline scheduler lab for capacity, shared bottleneck and outage scenarios.
+- Avoid redundant idle UI snapshot copies; preserve software/Vulkan rendering and correct the portable quick start.
+
 ## 0.4.0 — Wi-Fi connection assistant
 
 - Home starts with Wi-Fi discovery and gives a choice of two independent connection modes without a lab scope.

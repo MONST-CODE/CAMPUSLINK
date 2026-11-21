@@ -1,0 +1,50 @@
+{
+  "assets": [
+    {
+      "digest": "sha256:3faff24360cd33ffbf8436d6a6d5a8b08e4f5556a528539427711a4a2346c399",
+      "name": "BUILD_INFO.json",
+      "size": 4593
+    },
+    {
+      "digest": "sha256:f557c366021c2421dc6b552d80d9ac9610a42c431bbb6db3ae0378bb7d8b1cb8",
+      "name": "CAMPUSLINK-0.4.1-windows-x64-portable.zip",
+      "size": 2467311
+    },
+    {
+      "digest": "sha256:4c2dd9ff7108d1959f212cdf18aee51a0928414f0e11e878a6afec6a3b6e12d4",
+      "name": "deps.lock",
+      "size": 2249
+    },
+    {
+      "digest": "sha256:222fa0ec065d3031dc39937f71b832659e63569a5490834bc56a8f9a3266a404",
+      "name": "manifest.json",
+      "size": 10590
+    },
+    {
+      "digest": "sha256:c804c0911962205e5c62c066cc3ca74b4583cd899a829cac35e198b83647a07b",
+      "name": "RELEASE_NOTES.md",
+      "size": 331
+    },
+    {
+      "digest": "sha256:0e76da5bb4bd63c1af1d7a53058f7b34fe7c75a0687b90c3d7376c272b81c0ba",
+      "name": "RELEASE_REPORT.md",
+      "size": 310
+    },
+    {
+      "digest": "sha256:18b784103099b48568265822a3c82afb8af0ef7d19e0bb986f44eb7881c006ac",
+      "name": "SHA256SUMS.txt",
+      "size": 188
+    },
+    {
+      "digest": "sha256:506920fb196f4700554e2d835861d91a36efc99a84ce88cfedee0094269841f5",
+      "name": "windows-ci-logs.zip",
+      "size": 10391
+    }
+  ],
+  "draft": false,
+  "html_url": "https://github.com/MONST-CODE/CAMPUSLINK/releases/tag/v0.4.1",
+  "id": 452317128,
+  "prerelease": true,
+  "tag_name": "v0.4.1",
+  "target_commitish": "c2275d06b5757f7bac4fe068e313cca81825ee3b"
+}
