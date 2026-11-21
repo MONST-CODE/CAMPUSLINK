@@ -1,6 +1,6 @@
 # ADR 0004 — « Connexion d'abord », qualité du lien unique, et agrégation différée
 
-**Statut :** proposé (conception, non implémenté). Cible : 0.5.x. Fait suite à [ADR 0002](0002-connectivity-evidence.md) et [ADR 0003](0003-connection-reliability-and-workspace.md).
+**Statut :** Piste 1 **implémentée** en 0.5.0 (mémoire par environnement, stratèges de sélection, balayage multi-AP borné, surveillance optionnelle avec roaming proposé). Pistes 2 et 3 reportées. Cible : 0.5.x. Fait suite à [ADR 0002](0002-connectivity-evidence.md) et [ADR 0003](0003-connection-reliability-and-workspace.md).
 
 ## Contexte et priorité
 

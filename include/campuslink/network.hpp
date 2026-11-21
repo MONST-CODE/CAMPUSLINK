@@ -172,20 +172,38 @@ Handoff observe_path(Backend&, const Scope&, std::string_view interface_id, std:
 enum class WifiStatus { invalid, cancelled, failed, recovery_failed, request_unsettled, local_link, internet_reported, ip_pending, portal };
 inline constexpr unsigned wifi_max_attempts = 4;
 inline constexpr unsigned wifi_default_attempts = 3;
+inline constexpr unsigned wifi_sweep_cap = 6; // bound a full same-SSID sweep so total time stays bounded
 inline constexpr auto wifi_scan_ttl = std::chrono::minutes(2);
 struct WifiHistory {
     Bss candidate;
     Clock::time_point observed;
     bool success{};
 };
+// Per-network memory (ADR 0004): what worked for one network identity (SSID + security).
+// Persisted locally, user-clearable. It is NOT a location: two networks that share a name and
+// security are merged. It biases candidate selection toward known-good evidence, never fabricates.
+struct NetworkRecord {
+    std::string ssid, security, best_bssid;
+    unsigned successes{}, failures{};
+    bool portal_seen{};
+    std::optional<unsigned> assoc_ms, dhcp_ms; // smoothed last observed timings, for display
+    long long last_seen{};                     // epoch seconds, for display and pruning
+};
+inline bool record_trusts(const NetworkRecord& r, std::string_view bssid) {
+    return !r.best_bssid.empty() && r.best_bssid == bssid && r.successes > r.failures;
+}
 struct WifiPolicy {
     unsigned max_attempts{wifi_default_attempts};
     Clock::time_point scanned_at{}; // When provided, the scan must be fresh when the operation starts.
     std::span<const WifiHistory> history{};
     WifiBudget budget{};
     WifiProgressSink progress{};
+    std::optional<NetworkRecord> memory{}; // known-good evidence for the selected network, if any
+    bool sweep{};                           // try every saved access point of the SSID, not just a few
 };
-enum class WifiReason { selected, independent_idle, previous_success, avoid_recent_failure, signal };
+// known_good: this exact access point reached a usable link before (persistent memory).
+// less_congested: equal signal, fewer other access points share the channel (AP density, not load).
+enum class WifiReason { selected, independent_idle, previous_success, avoid_recent_failure, signal, known_good, less_congested };
 struct WifiAttempt {
     Bss candidate;
     std::optional<Error> error;
@@ -205,11 +223,21 @@ struct WifiResult {
 // candidates. 5/6 GHz gets a 6 dB preference when its reported signal is at least -72 dBm (less
 // crowded spectrum, wider channels); otherwise the strongest reported signal wins. This is a
 // heuristic on scan data, not a throughput measurement.
-enum class StartReason { strongest, wider_band };
+// known_good: the network's remembered best access point is in range with adequate signal.
+enum class StartReason { strongest, wider_band, known_good };
 struct StartChoice { std::size_t index{}; StartReason reason{}; };
-std::optional<StartChoice> recommend_start(std::span<const Bss> candidates);
+std::optional<StartChoice> recommend_start(std::span<const Bss> candidates, const NetworkRecord* memory = nullptr);
+// Number of other access points sharing each candidate's channel in the same scan. A coarse
+// density proxy (not airtime or load), used only as a deterministic tiebreak between equal signals.
+unsigned channel_density(const Discovery&, const Bss&);
 std::vector<Bss> wifi_plan(const Bss& selected, const Discovery&, const Snapshot&, WifiMode, WifiPolicy = {}, Clock::time_point = Clock::now());
 WifiResult connect_wifi(Backend&, const Bss& selected, const Discovery&, WifiMode, std::stop_token, WifiPolicy = {});
+// Propose (never perform) moving the current association to a clearly stronger access point of the
+// same saved network. Returns a suggestion only when the active link is at or below weak_floor_dbm
+// AND an eligible access point improves RSSI by at least min_gain_db (hysteresis). The caller proposes.
+struct RoamSuggestion { Bss target; int from_rssi{}; int to_rssi{}; };
+std::optional<RoamSuggestion> suggest_roam(const Interface& active, const Discovery&, const Snapshot&,
+                                           int weak_floor_dbm, int min_gain_db);
 Backend& platform();
 std::optional<Error> loopback_protocol(unsigned port);
 }

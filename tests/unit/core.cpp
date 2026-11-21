@@ -1,4 +1,5 @@
 #include "campuslink/network.hpp"
+#include "campuslink/memory.hpp"
 #include "campuslink/path_lab.hpp"
 #include "campuslink/ui_text.hpp"
 #include "campuslink/dns.hpp"
@@ -310,6 +311,79 @@ int main() {
         require(net::recommend_start(only_far)->index == 0, "weak 5 GHz below the floor was preferred");
         const std::array none{unsaved};
         require(!net::recommend_start(none), "unsaved access point recommended");
+    });
+    check("per-network memory: round trip, corruption fallback and outcome smoothing", [] {
+        std::vector<net::NetworkRecord> store;
+        net::record_outcome(store, "Caf\\xc3\\xa9", "Privacy bit set", true, false, "02:00:00:00:00:a1", 300u, 1200u, 1000);
+        net::record_outcome(store, "Caf\\xc3\\xa9", "Privacy bit set", true, true, "02:00:00:00:00:a1", 500u, 800u, 1100);
+        net::record_outcome(store, "Other", "No privacy bit", false, false, "", std::nullopt, std::nullopt, 1200);
+        const auto* r = net::find_record(store, "Caf\\xc3\\xa9", "Privacy bit set");
+        require(r && r->successes == 2 && r->failures == 0 && r->portal_seen && r->best_bssid == "02:00:00:00:00:a1", "success not recorded");
+        require(r->assoc_ms == 350u && r->dhcp_ms == 1100u, "timings not smoothed 3:1");
+        const auto* f = net::find_record(store, "Other", "No privacy bit");
+        require(f && f->failures == 1 && f->successes == 0 && f->best_bssid.empty(), "failure recorded a best bssid");
+        const auto text = net::encode_networks(store);
+        const auto back = net::decode_networks(text);
+        require(back && back->size() == 2 && net::find_record(*back, "Caf\\xc3\\xa9", "Privacy bit set")->assoc_ms == 350u, "store did not round-trip");
+        require(!net::decode_networks("garbage\n"), "invalid header accepted");
+        require(!net::decode_networks("CAMPUSLINK_NET_V1\nname\tsec\n"), "short record accepted");
+        require(net::decode_networks("CAMPUSLINK_NET_V1\n")->empty(), "empty store not accepted");
+        std::vector<net::NetworkRecord> big;
+        for (unsigned i = 0; i < net::network_memory_cap + 20; ++i)
+            net::record_outcome(big, "N" + std::to_string(i), "sec", true, false, "02:00:00:00:00:01", std::nullopt, std::nullopt, static_cast<long long>(i));
+        require(big.size() == net::network_memory_cap && net::find_record(big, "N0", "sec") == nullptr, "store not pruned to cap by recency");
+        require(net::find_record(big, "N" + std::to_string(net::network_memory_cap + 19), "sec"), "most recent record pruned");
+    });
+    check("recommend_start prefers a remembered-good access point in range", [] {
+        net::NetworkRecord record; record.ssid = target.ssid; record.security = target.security;
+        record.best_bssid = "02:00:00:00:00:07"; record.successes = 4; record.failures = 1;
+        auto known = target, strong = target; known.bssid = record.best_bssid; known.rssi = -74; known.mhz = 2412;
+        strong.bssid.back() = '8'; strong.rssi = -52; strong.mhz = 5180;
+        const std::array set{strong, known};
+        const auto pick = net::recommend_start(set, &record);
+        require(pick && set[pick->index].bssid == record.best_bssid && pick->reason == net::StartReason::known_good, "known-good not preferred");
+        auto weak_known = known; weak_known.rssi = -85; const std::array set2{strong, weak_known};
+        require(net::recommend_start(set2, &record)->reason != net::StartReason::known_good, "known-good used below the signal floor");
+        record.failures = 5; const std::array set3{strong, known};
+        require(net::recommend_start(set3, &record)->reason != net::StartReason::known_good, "known-good used despite more failures than successes");
+    });
+    check("wifi_plan orders by memory, then session, then signal, then channel density; sweep is bounded", [] {
+        auto a = target, b = target, c = target, d = target;
+        a.bssid.back() = '3'; a.rssi = -60; a.mhz = 5180; a.channel = 36;
+        b.bssid.back() = '4'; b.rssi = -60; b.mhz = 5200; b.channel = 40;   // same signal as a, we crowd a's channel
+        c.bssid.back() = '5'; c.rssi = -70; c.mhz = 2412; c.channel = 1;
+        d.bssid.back() = '6'; d.rssi = -55; d.mhz = 5220; d.channel = 44;
+        auto crowd1 = target, crowd2 = target; crowd1.bssid = "aa:aa:aa:aa:aa:aa"; crowd1.mhz = 5180; crowd1.channel = 36; crowd1.profile.clear();
+        crowd2.bssid = "bb:bb:bb:bb:bb:bb"; crowd2.mhz = 5180; crowd2.channel = 36; crowd2.profile.clear();
+        net::Discovery scan{{target, a, b, c, d, crowd1, crowd2}, {}};
+        net::Snapshot topo{{wifi_interface("wifi0", "radio0")}, {}};
+        require(net::channel_density(scan, a) == 2 && net::channel_density(scan, b) == 0, "channel density miscounted");
+        const auto plan = net::wifi_plan(target, scan, topo, net::WifiMode::assisted, {4, {}}, net::Clock::now());
+        require(plan.size() == 4 && plan[1].bssid == d.bssid, "strongest alternative not first");
+        require(plan[2].bssid == b.bssid, "equal-signal less-crowded channel not preferred");
+        net::NetworkRecord record; record.ssid = target.ssid; record.security = target.security;
+        record.best_bssid = c.bssid; record.successes = 3; record.failures = 0;
+        net::WifiPolicy mem{4, {}}; mem.memory = record;
+        require(net::wifi_plan(target, scan, topo, net::WifiMode::assisted, mem, net::Clock::now())[1].bssid == c.bssid, "memory-good not first among alternatives");
+        net::Discovery many{{target}, {}};
+        for (char s : {'3','4','5','6','7','8','9','a'}) { auto x = target; x.bssid.back() = s; x.rssi = -50 - (s - '3'); many.bss.push_back(x); }
+        net::WifiPolicy sweep{4, {}}; sweep.sweep = true;
+        require(net::wifi_plan(target, many, topo, net::WifiMode::assisted, sweep, net::Clock::now()).size() == net::wifi_sweep_cap, "sweep not bounded to the cap");
+    });
+    check("suggest_roam proposes only a clearly stronger access point of a weak current link", [] {
+        auto active = wifi_interface("wifi0", "radio0"); active.associated = active.up = true;
+        active.ssid = target.ssid; active.profile = target.profile; active.bssid = "02:00:00:00:00:01"; active.rssi = -72;
+        net::Snapshot topo{{active}, {}};
+        auto near = target, far = target, other = target;
+        near.bssid = "02:00:00:00:00:02"; near.rssi = -55;   // +17 dB
+        far.bssid = "02:00:00:00:00:03"; far.rssi = -68;     // +4 dB, below hysteresis
+        other.bssid = "02:00:00:00:00:04"; other.rssi = -40; other.ssid = "Different";
+        net::Discovery scan{{near, far, other}, {}};
+        const auto s = net::suggest_roam(active, scan, topo, -67, 12);
+        require(s && s->target.bssid == near.bssid && s->to_rssi == -55, "a clear improvement was not proposed");
+        require(!net::suggest_roam(active, {{far}, {}}, topo, -67, 12), "a small improvement was proposed");
+        active.rssi = -60; // link is fine, do not nag
+        require(!net::suggest_roam(active, scan, topo, -67, 12), "a strong link was asked to roam");
     });
     check("SSIDs display as UTF-8 and never inject controls", [] {
         require(net::display_ssid("Caf\\xc3\\xa9 Campus") == "Café Campus", "UTF-8 SSID not decoded");

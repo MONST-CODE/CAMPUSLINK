@@ -2,6 +2,7 @@
 #include "campuslink/build_info.hpp"
 #include "campuslink/path_lab.hpp"
 #include "campuslink/network.hpp"
+#include "campuslink/memory.hpp"
 #include "campuslink/simulation.hpp"
 #include "campuslink/ui_text.hpp"
 #include "appearance.hpp"
@@ -59,6 +60,8 @@ struct View {
     std::optional<net::WifiProgress> wifi_progress;               // engine-confirmed stage while running
     net::WifiMode wifi_mode{net::WifiMode::normal};
     std::vector<net::WifiHistory> wifi_history;
+    std::vector<net::NetworkRecord> networks;                    // per-environment memory (ADR 0004)
+    std::optional<net::RoamSuggestion> roam;                     // proposed stronger access point, user decides
     std::optional<std::array<lab::Result, 3>> path_lab;
     int path_lab_scenario{};
     std::vector<net::Scope> scopes;
@@ -77,6 +80,8 @@ struct View {
 };
 constexpr auto wifi_cooldown = 15s;
 constexpr auto scan_cooldown = 10s;
+constexpr int roam_weak_floor = -70, roam_min_gain = 12; // only roam from a weak link to a clearly stronger AP
+constexpr auto roam_dismiss = 5min;                      // after "Stay", do not propose again for a while
 std::vector<std::pair<std::string, net::Reachability>> reachability(const net::Snapshot& s) {
     std::vector<std::pair<std::string, net::Reachability>> out;
     for (const auto& i : s.interfaces) if (i.wireless && i.associated) out.emplace_back(i.id, net::platform().reachability(i));
@@ -91,9 +96,49 @@ class Worker {
     net::Clock::time_point last_wifi_{net::Clock::now() - 1min};
     net::Clock::time_point last_scan_{net::Clock::now() - 1min};
     fs::path folder_;
-    std::jthread thread_; // destroyed first; callbacks cannot outlive their state
+    std::vector<net::NetworkRecord> memory_; // authoritative; touched only on the worker task thread
+    std::atomic_bool monitor_on_{false};
+    std::atomic<long long> dismiss_until_ns_{};
+    std::jthread thread_; // callbacks cannot outlive their state
+    void monitor_loop(std::stop_token st) {
+        while (!st.stop_requested()) {
+            if (monitor_on_.load() && !busy_.load()) {
+                auto snap = net::platform().inspect(st);
+                auto reach = reachability(snap);
+                const net::Interface* active{};
+                for (const auto& i : snap.interfaces) if (i.wireless && i.associated) { active = &i; break; }
+                std::optional<net::RoamSuggestion> roam;
+                if (active && net::Clock::now().time_since_epoch().count() >= dismiss_until_ns_.load()) {
+                    const auto saved = copy();
+                    if (saved.scan_at != net::Clock::time_point{} && net::Clock::now() - saved.scan_at < net::wifi_scan_ttl)
+                        roam = net::suggest_roam(*active, saved.discovery, snap, roam_weak_floor, roam_min_gain);
+                }
+                update([&](View& v) { v.hardware = std::move(snap); v.reach = std::move(reach); v.inspected_at = net::Clock::now(); v.roam = roam; });
+            }
+            for (int i = 0; i < 40 && !st.stop_requested(); ++i) std::this_thread::sleep_for(100ms);
+        }
+    }
+    std::jthread monitor_; // declared after thread_: stops and joins first on destruction
+    std::vector<net::NetworkRecord> load_networks() const {
+        try { return net::decode_networks(read("networks-v1.conf", net::network_memory_bytes)).value_or(std::vector<net::NetworkRecord>{}); }
+        catch (...) { return {}; }
+    }
+    void persist_networks() const {
+        if (folder_.empty()) return;
+        try { write("networks-v1.conf", net::encode_networks(memory_)); } catch (...) {}
+    }
 public:
-    explicit Worker(fs::path folder) : folder_(std::move(folder)) {}
+    explicit Worker(fs::path folder) : folder_(std::move(folder)) {
+        memory_ = load_networks(); view_.networks = memory_;
+        monitor_ = std::jthread([this](std::stop_token st) { monitor_loop(st); });
+    }
+    // Optional, read-only link-quality watch. Runs on its own thread so the user can still act.
+    // It never changes the link; it only proposes a stronger access point of the same network.
+    void set_watch(bool on) { monitor_on_ = on; if (!on) update([](View& v) { v.roam.reset(); }); }
+    void dismiss_roam() {
+        dismiss_until_ns_ = (net::Clock::now() + roam_dismiss).time_since_epoch().count();
+        update([](View& v) { v.roam.reset(); });
+    }
     const fs::path& folder() const { return folder_; }
     bool busy() const { return busy_.load(); }
     bool paused() const { return paused_.load(); }
@@ -183,8 +228,8 @@ public:
             });
         });
     }
-    void wifi(net::Bss selected, net::WifiMode mode) {
-        run(english(mode == net::WifiMode::normal ? Key::WifiNormal : Key::WifiAssist), [this, selected = std::move(selected), mode](auto stop) {
+    void wifi(net::Bss selected, net::WifiMode mode, bool sweep = false) {
+        run(english(mode == net::WifiMode::normal ? Key::WifiNormal : Key::WifiAssist), [this, selected = std::move(selected), mode, sweep](auto stop) {
             const auto now = net::Clock::now();
             if (now - last_wifi_ < wifi_cooldown) throw std::runtime_error(english(Key::WifiCooldown));
             const auto saved = copy();
@@ -192,16 +237,33 @@ public:
                 throw std::runtime_error(english(Key::WifiCannotStart));
             last_wifi_ = now;
             update([&](View& v) {
-                v.wifi.reset(); v.wifi_mode = mode; v.wifi_ready = now + wifi_cooldown;
+                v.wifi.reset(); v.wifi_mode = mode; v.wifi_ready = now + wifi_cooldown; v.roam.reset();
                 v.wifi_progress = net::WifiProgress{net::WifiStage::preparing, 0, 0, selected.bssid};
             });
             net::WifiPolicy policy{net::wifi_default_attempts, saved.scan_at, saved.wifi_history};
             policy.progress = [this](const net::WifiProgress& p) { update([&](View& v) { v.wifi_progress = p; }); };
+            policy.sweep = sweep;
+            if (const auto* r = net::find_record(memory_, selected.ssid, selected.security)) policy.memory = *r;
             auto result = net::connect_wifi(net::platform(), selected, saved.discovery, mode, stop, policy);
             for (const auto& attempt : result.attempts) if (attempt.error) log("WARN", "handoff", attempt.error->operation, attempt.error->code);
+            // Learn from the outcome: a usable link (even portal/local-only) is a success for this
+            // network; only a validated failure counts against it. Ambiguous ends are not recorded.
+            const auto epoch = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+            const auto st = result.status;
+            const bool usable = result.link && (st == net::WifiStatus::internet_reported || st == net::WifiStatus::local_link || st == net::WifiStatus::portal);
+            std::optional<unsigned> assoc_ms, dhcp_ms;
+            if (!result.attempts.empty()) {
+                const auto& a = result.attempts.back();
+                if (a.timing.association) assoc_ms = static_cast<unsigned>(a.timing.association->count());
+                if (a.timing.usable) dhcp_ms = static_cast<unsigned>(a.timing.usable->count());
+            }
+            if (usable) net::record_outcome(memory_, selected.ssid, selected.security, true, st == net::WifiStatus::portal, result.link->bssid, assoc_ms, dhcp_ms, epoch);
+            else if (st == net::WifiStatus::failed) net::record_outcome(memory_, selected.ssid, selected.security, false, false, {}, {}, {}, epoch);
+            if (usable || st == net::WifiStatus::failed) persist_networks();
             auto hardware = net::platform().inspect({});
             auto reach = reachability(hardware);
             update([&](View& v) {
+                v.networks = memory_;
                 // Only association-level outcomes describe an access point; address and
                 // authentication problems are network-wide and must not demote a BSSID.
                 if (mode == net::WifiMode::assisted && result.status != net::WifiStatus::cancelled &&
@@ -219,6 +281,18 @@ public:
         });
     }
     void clear_wifi_history() { update([](View& v) { v.wifi_history.clear(); }); }
+    void forget_network(std::string ssid, std::string security) {
+        if (busy()) return;
+        std::erase_if(memory_, [&](const auto& r) { return r.ssid == ssid && r.security == security; });
+        persist_networks();
+        update([&](View& v) { v.networks = memory_; });
+    }
+    void clear_networks() {
+        if (busy()) return;
+        memory_.clear();
+        persist_networks();
+        update([](View& v) { v.networks.clear(); });
+    }
     void run_path_lab(int scenario) {
         run(english(Key::PathLabRun), [this, scenario](auto stop) {
             auto model = lab::Scenario{{lab::Path{23, 1900, 0, 5}, lab::Path{110, 1450, 0, 20}}, 0, 128};
@@ -601,6 +675,7 @@ struct Screen {
     std::string start_bssid;        // assisted start access point (bssid + interface)
     std::string start_interface;
     bool fixture{};                 // smoke rendering with sample data; never set in normal use
+    bool assisted_sweep{}, pending_sweep{};  // try every saved access point of the SSID (ADR 0004)
     bool switch_requested{}, trial_requested{}; // deferred OpenPopup (see request/start_wifi)
 
     sim::Config config;
@@ -610,6 +685,7 @@ struct Screen {
     std::size_t seen_revision{};
     int path_scenario{};
     bool path_consent{};
+    bool watch_link{};  // optional link-quality watch (ADR 0004); session-only
     View view;
     void request(std::vector<net::Experiment> experiments, bool from_queue = false) {
         confirmation_queue = from_queue;
@@ -632,12 +708,12 @@ struct Screen {
         for (const auto& [id, r] : view.reach) if (id == i.id) return r;
         return std::nullopt;
     }
-    void start_wifi(Worker& worker, const net::Bss& target, net::WifiMode mode) {
+    void start_wifi(Worker& worker, const net::Bss& target, net::WifiMode mode, bool sweep = false) {
         const auto* active = active_wifi();
         const bool disruptive = active && active->id == target.interface_id && !(active->ssid == target.ssid && active->profile == target.profile);
-        wifi_mode = mode;
+        wifi_mode = mode; pending_sweep = sweep;
         if (disruptive) { wifi_confirmation = target; switch_requested = true; return; }
-        worker.wifi(target, mode);
+        worker.wifi(target, mode, sweep);
     }
 
     // ---- page chrome ------------------------------------------------------------------------
@@ -771,6 +847,20 @@ struct Screen {
             ImGui::EndTable();
         }
         w::caption(c, active->description.empty() ? active->name : active->description, false);
+        w::gap(space::xs);
+        if (consent_box("##watch", tr(Key::WatchLink), &watch_link)) worker.set_watch(watch_link);
+        w::end_card();
+    }
+    void roam_card(Worker& worker) {
+        if (!view.roam) return;
+        const auto& c = colors();
+        if (!w::begin_card(c, "roam", 0, true)) { w::end_card(); return; }
+        w::banner(c.info, c, tr(Key::RoamTitle), format(tr(Key::RoamBody), view.roam->from_rssi, view.roam->to_rssi));
+        w::gap(space::sm);
+        ImGui::BeginDisabled(worker.busy());
+        if (w::button(c, tr(Key::RoamSwitch), w::Kind::primary)) start_wifi(worker, view.roam->target, net::WifiMode::assisted);
+        ImGui::EndDisabled(); ImGui::SameLine();
+        if (w::button(c, tr(Key::RoamDismiss))) worker.dismiss_roam();
         w::end_card();
     }
     void network_row(const Network& n, bool selected) {
@@ -857,12 +947,20 @@ struct Screen {
         if (!w::begin_card(c, "selection")) { w::end_card(); return; }
         w::caption(c, tr(Key::WifiNetwork), false);
         w::title(c, n.label);
+        const net::NetworkRecord* record = net::find_record(view.networks, n.ssid, n.security);
+        if (record && (record->successes > 0 || record->portal_seen)) {
+            if (record->successes > 0) { w::badge(c.success, tr(Key::KnownNetwork)); ImGui::SameLine(); }
+            if (record->portal_seen) { w::badge(c.warning, tr(Key::PortalExpected)); ImGui::SameLine(); }
+            ImGui::BeginDisabled(worker.busy());
+            if (w::button(c, tr(Key::ForgetNetwork), w::Kind::link)) worker.forget_network(n.ssid, n.security);
+            ImGui::EndDisabled();
+        }
         // Normal mode: the strongest saved row (Windows still picks the BSSID). Assisted: chosen start AP.
         const net::Bss* normal_target{};
         for (const auto m : n.members) if (!view.discovery.bss[m].profile.empty()) { normal_target = &view.discovery.bss[m]; break; }
         std::vector<net::Bss> members;
         for (const auto m : n.members) members.push_back(view.discovery.bss[m]);
-        const auto recommended = net::recommend_start(members);
+        const auto recommended = net::recommend_start(members, record);
         const net::Bss* recommended_bss = recommended ? &view.discovery.bss[n.members[recommended->index]] : normal_target;
         const net::Bss* assisted_target = recommended_bss;
         for (const auto m : n.members) {
@@ -918,10 +1016,13 @@ struct Screen {
                 }
                 ImGui::EndTable();
             }
-            if (recommended) w::caption(c, tr(recommended->reason == net::StartReason::wider_band ? Key::StartWiderBand : Key::StartStrongest));
+            if (recommended) w::caption(c, tr(recommended->reason == net::StartReason::known_good ? Key::StartKnownGood :
+                recommended->reason == net::StartReason::wider_band ? Key::StartWiderBand : Key::StartStrongest));
+            w::gap(space::xs);
+            consent_box("##sweep", tr(Key::AssistSweep), &assisted_sweep);
             w::gap(space::xs);
             ImGui::BeginDisabled(!can || !assisted_target);
-            if (w::button(c, (std::string(tr(Key::WifiAssist)) + "###assist").c_str(), w::Kind::secondary)) start_wifi(worker, *assisted_target, net::WifiMode::assisted);
+            if (w::button(c, (std::string(tr(Key::WifiAssist)) + "###assist").c_str(), w::Kind::secondary)) start_wifi(worker, *assisted_target, net::WifiMode::assisted, assisted_sweep);
             ImGui::EndDisabled();
             if (ready_in > 0 && !worker.busy()) { ImGui::SameLine(); ImGui::AlignTextToFramePadding(); w::caption(c, format(tr(Key::AvailableIn), static_cast<int>(ready_in)), false); }
         }
@@ -942,7 +1043,7 @@ struct Screen {
                 w::gap(space::md);
             }
             ImGui::BeginDisabled(worker.busy() || !wifi_confirmation);
-            if (w::button(c, tr(Key::Continue), w::Kind::primary)) { worker.wifi(*wifi_confirmation, wifi_mode); wifi_confirmation.reset(); ImGui::CloseCurrentPopup(); }
+            if (w::button(c, tr(Key::Continue), w::Kind::primary)) { worker.wifi(*wifi_confirmation, wifi_mode, pending_sweep); wifi_confirmation.reset(); ImGui::CloseCurrentPopup(); }
             ImGui::EndDisabled(); ImGui::SameLine();
             if (w::button(c, tr(Key::Cancel)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) { wifi_confirmation.reset(); ImGui::CloseCurrentPopup(); }
             ImGui::EndPopup();
@@ -1022,7 +1123,8 @@ struct Screen {
                     w::end_fields();
                 }
                 unsigned n{};
-                constexpr std::array reasons{Key::WifiReasonSelected, Key::WifiReasonIndependent, Key::WifiReasonSuccess, Key::WifiReasonFailure, Key::WifiReasonSignal};
+                constexpr std::array reasons{Key::WifiReasonSelected, Key::WifiReasonIndependent, Key::WifiReasonSuccess, Key::WifiReasonFailure,
+                    Key::WifiReasonSignal, Key::WifiReasonKnownGood, Key::WifiReasonLessCongested};
                 for (const auto& a : r.attempts) {
                     ImGui::PushID(static_cast<int>(n));
                     w::section(c, format(tr(Key::AttemptNumber), ++n));
@@ -1057,6 +1159,7 @@ struct Screen {
         const auto side = [&] {
             current_connection_card(worker);
             w::gap(space::md);
+            if (view.roam) { roam_card(worker); w::gap(space::md); }
             if (view.wifi_progress) { progress_card(worker); w::gap(space::md); }
             else if (view.wifi) { result_card(worker, *view.wifi, chosen, fresh); w::gap(space::md); }
             if (chosen) selection_card(worker, *chosen, fresh);
@@ -1077,6 +1180,7 @@ struct Screen {
         } else {
             current_connection_card(worker);
             w::gap(space::md);
+            if (view.roam) { roam_card(worker); w::gap(space::md); }
             if (view.wifi_progress) { progress_card(worker); w::gap(space::md); }
             else if (view.wifi) { result_card(worker, *view.wifi, chosen, fresh); w::gap(space::md); }
             networks_card(worker, networks, fresh);
@@ -1740,6 +1844,7 @@ View fixture_view(int state) {
     if (state != 0) {
         wifi.associated = true; wifi.ssid = "Campus"; wifi.profile = "Campus"; wifi.bssid = "02:00:00:00:00:a1";
         wifi.address = "192.0.2.211"; wifi.gateway = "192.0.2.1"; wifi.rssi = -61; wifi.channel = 44;
+        if (state == 7) { wifi.bssid = "02:00:00:00:00:a3"; wifi.rssi = -74; wifi.channel = 6; } // weak link, roam proposed
     } else wifi.wlan_idle = true;
     v.hardware.interfaces = {wifi};
     v.inspected_at = now - 4s;
@@ -1757,9 +1862,14 @@ View fixture_view(int state) {
         add("Lab-Recherche", "02:00:00:00:00:d1", -82, 5745, 149, true, "");
         add("", "02:00:00:00:00:e1", -88, 2412, 1, true, "");
         v.scan_at = now - 25s;
+        net::NetworkRecord rec; rec.ssid = "Campus"; rec.security = "Privacy bit set (suite unverified)";
+        rec.best_bssid = "02:00:00:00:00:a1"; rec.successes = 6; rec.failures = 1; rec.assoc_ms = 1840; rec.dhcp_ms = 6420;
+        if (state == 4) rec.portal_seen = true;
+        v.networks.push_back(rec);
+        if (state == 7) v.roam = net::RoamSuggestion{v.discovery.bss[0], -74, -61};
     }
     if (state == 2) v.wifi_progress = net::WifiProgress{net::WifiStage::obtaining_address, 1, 3, "02:00:00:00:00:a1"}, v.wifi_mode = net::WifiMode::assisted;
-    if (state >= 3) {
+    if (state >= 3 && state != 7) {
         net::WifiResult r;
         net::WifiAttempt a{v.discovery.bss[0], {}, {}, net::WifiReason::selected};
         a.timing.association = 1840ms; a.timing.usable = 6420ms;
@@ -1826,7 +1936,7 @@ int run(bool smoke, bool graphics) {
         v.scan_at = v.inspected_at = net::Clock::now();
         live_view = std::move(v);
     }
-    const unsigned fixtures = 7 + (live ? 1u : 0u);
+    const unsigned fixtures = 8 + (live ? 1u : 0u);
     const auto per_test = panels + fixtures;
     constexpr unsigned repeats = 3; // auto-sized cards settle after the first frame of new content
     const auto total_frames = 4 * per_test * repeats;
@@ -1885,7 +1995,7 @@ int run(bool smoke, bool graphics) {
             else {
                 fixture_state = static_cast<int>(index - panels);
                 screen.page = Page::connect;
-                if (fixture_state == 7 && live_view) {
+                if (fixture_state == 8 && live_view) {
                     screen.fixture = false; screen.view = *live_view; screen.selected_network.clear();
                     for (const auto& n : group_networks(screen.view)) if (n.saved) { screen.selected_network = n.key; break; }
                 } else {
@@ -1918,7 +2028,7 @@ int run(bool smoke, bool graphics) {
         ImGui::PopFont();
         std::string screenshot;
         if (capture_dir && last_repeat) screenshot = std::string(capture_dir) + '/' + capture_codes[test] + '-' +
-            (fixture_state == 7 ? std::string("connect-live") : fixture_state >= 0 ? "connect-" + std::to_string(fixture_state) : "page-" + std::to_string(static_cast<unsigned>(screen.page))) + ".bmp";
+            (fixture_state == 8 ? std::string("connect-live") : fixture_state >= 0 ? "connect-" + std::to_string(fixture_state) : "page-" + std::to_string(static_cast<unsigned>(screen.page))) + ".bmp";
         if (!display.draw(screenshot.empty() ? nullptr : screenshot.c_str())) {
             if (smoke || !display.gpu) { SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Rendering failed: %s", SDL_GetError()); return 1; }
             display.shutdown(); display.warning = english(Key::VulkanRenderingFailedUsingSdl);

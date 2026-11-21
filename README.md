@@ -4,7 +4,7 @@ Assistant de connexion Wi-Fi pour **Windows 11 x64**. L’application s’ouvre 
 
 **EN.** CAMPUSLINK is a native Wi-Fi connection assistant. It opens on **Wi-Fi connection**: search, select a network, then connect normally or with assistance. Progress follows what Windows confirmed; failures state their cause and next step. Extract the whole portable ZIP and run `CampusLink.exe` next to `SDL3.dll`. Vulkan is preferred; SDL software rendering is the fallback.
 
-![Connection workspace (sample data)](docs/reports/evidence/v0.4.2/fr-light-connect-1.png)
+![Connection workspace (sample data)](docs/reports/evidence/v0.5.0/fr-light-connect-1.png)
 
 ## Build
 
@@ -23,6 +23,6 @@ Developer build without Visual Studio (MSYS2 UCRT64 clang + SDL3, Dear ImGui sou
 
 ## Documentation
 
-[User guide (FR/EN)](docs/USER_GUIDE.md) · [Architecture](docs/ARCHITECTURE.md) · [ADR 0003 — connection reliability](docs/decisions/0003-connection-reliability-and-workspace.md) · [ADR 0002 — transport](docs/decisions/0002-connectivity-evidence.md) · [Audit 0.4.0/0.4.1](docs/reports/AUDIT_0.4.0_0.4.1.md) · [Performance 0.4.2](docs/reports/PERF_0.4.2.md) · [Known limitations](docs/KNOWN_LIMITATIONS.md) · [Windows 11 field validation](docs/WINDOWS11_VALIDATION.md)
+[User guide (FR/EN)](docs/USER_GUIDE.md) · [Architecture](docs/ARCHITECTURE.md) · [ADR 0004 — connection-first](docs/decisions/0004-connection-first-and-link-quality.md) · [ADR 0003 — reliability](docs/decisions/0003-connection-reliability-and-workspace.md) · [ADR 0002 — transport](docs/decisions/0002-connectivity-evidence.md) · [Audit 0.4.0/0.4.1](docs/reports/AUDIT_0.4.0_0.4.1.md) · [Performance 0.4.2](docs/reports/PERF_0.4.2.md) · [Known limitations](docs/KNOWN_LIMITATIONS.md) · [Windows 11 field validation](docs/WINDOWS11_VALIDATION.md)
 
 The research lab (scoped CLP1 measurements, Virtual Client Lab, multipath scheduler models) is separate and opt-in. It does not simulate radio capability and forwards no Internet traffic.

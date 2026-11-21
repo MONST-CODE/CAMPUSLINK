@@ -23,6 +23,14 @@ L’application s’ouvre sur **Connexion Wi-Fi**.
 
 Si le réseau n’a pas de profil, **Ouvrir les paramètres Wi-Fi de Windows**, connectez-vous une première fois, puis relancez la recherche. Les identifiants, l’adresse IP et les routes restent gérés par Windows.
 
+### Mémoire par réseau (0.5)
+
+CAMPUSLINK retient **localement** ce qui a fonctionné sur chaque réseau : le point d’accès qui a réussi, si une identification a été demandée, les délais typiques. Au retour sur un réseau connu, le point d’accès de départ **Recommandé** est celui qui marchait, et le badge **Réseau connu** apparaît. Rien ne quitte votre ordinateur. **Oublier ce qui a été appris** efface la mémoire d’un réseau. Sur un réseau public encombré, cochez **Essayer tous les points d’accès de ce réseau** pour que l’assistance les parcoure tous (nombre borné) au lieu de quelques-uns.
+
+### Surveillance du lien (0.5, optionnelle)
+
+Cochez **Surveiller la qualité du lien** sous la connexion actuelle. Tant que c’est activé, si le lien devient faible **et** qu’un point d’accès nettement plus fort du même réseau est visible dans la dernière recherche, CAMPUSLINK **propose** d’y basculer — il ne le fait jamais tout seul. **Rester** écarte la proposition pour quelques minutes. Aucune sonde active n’est émise ; la bascule éventuelle peut couper brièvement la connexion.
+
 ## Connect to a Wi-Fi network
 
 The app opens on **Wi-Fi connection**. **Current connection** shows the network, the Internet state reported by Windows, signal, band/channel, IPv4, gateway and adapter, with the age of the information. **Search for networks** lists each network once (security, bands, number of access points, *Connected* / *Saved* / *Not saved*). When Windows does not confirm a fresh scan in time, the networks it heard in the last two minutes are shown and labelled as such.

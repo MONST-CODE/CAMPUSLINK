@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.0 — Connection-first: memory, strategists and link watch
+
+- Per-environment memory (local, user-clearable): CAMPUSLINK remembers, per network, the access point that worked, whether a sign-in was needed and typical timings, and starts from what worked next time. A "Known network" badge, a sign-in hint and a "forget" control expose it.
+- Candidate selection folds persistent memory, fresh session evidence, signal/band and channel density (AP count) into one explainable order; each attempt shows why its access point was chosen.
+- Optional multi-access-point sweep for crowded public networks (bounded), opt-in per connection.
+- Optional link-quality watch on a separate thread: on a weak link it *proposes* (never forces) a clearly stronger access point of the same network; dismissable with a cooldown. No active probing.
+- ADR 0004 documents this and keeps path aggregation and a self-hosted gateway as deferred, documented tracks. Unit tests 60; catalog 638 keys.
+
 ## 0.4.2 — Reliable connection assistant and new workspace
 
 - Slow DHCP no longer causes a disconnection: separate association (25 s) and address (40 s) budgets; the association is kept (*address pending*) unless a usable previous link must be restored.

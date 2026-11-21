@@ -366,13 +366,26 @@ std::string display_ssid(std::string_view escaped) {
     }
     return out;
 }
-std::optional<StartChoice> recommend_start(std::span<const Bss> candidates) {
-    constexpr int wide_band_bonus = 6, wide_band_floor = -72;
+unsigned channel_density(const Discovery& scan, const Bss& b) {
+    const auto band = [](unsigned mhz) { return mhz >= 5925 ? 3u : mhz >= 4900 ? 2u : mhz >= 2400 ? 1u : 0u; };
+    if (!b.channel || !band(b.mhz)) return 0;
+    unsigned n{};
+    for (const auto& x : scan.bss) if (x.channel == b.channel && band(x.mhz) == band(b.mhz) && x.bssid != b.bssid) ++n;
+    return n;
+}
+std::optional<StartChoice> recommend_start(std::span<const Bss> candidates, const NetworkRecord* memory) {
+    constexpr int wide_band_bonus = 6, wide_band_floor = -72, known_good_floor = -80;
+    const auto eligible = [](const Bss& b) { return !b.profile.empty() && b.infrastructure && bssid_format(b.bssid); };
+    // Memory first: a remembered-good access point still in range with adequate signal.
+    if (memory && !memory->best_bssid.empty() && memory->successes > memory->failures)
+        for (std::size_t i = 0; i < candidates.size(); ++i)
+            if (eligible(candidates[i]) && candidates[i].bssid == memory->best_bssid && candidates[i].rssi >= known_good_floor)
+                return StartChoice{i, StartReason::known_good};
     const auto score = [](const Bss& b) { return b.rssi + (b.mhz >= 4900 && b.rssi >= wide_band_floor ? wide_band_bonus : 0); };
     std::optional<std::size_t> best, strongest;
     for (std::size_t i = 0; i < candidates.size(); ++i) {
         const auto& b = candidates[i];
-        if (b.profile.empty() || !b.infrastructure || !bssid_format(b.bssid)) continue;
+        if (!eligible(b)) continue;
         if (!strongest || b.rssi > candidates[*strongest].rssi) strongest = i;
         if (!best || score(b) > score(candidates[*best]) ||
             (score(b) == score(candidates[*best]) && std::tie(b.interface_id, b.bssid) < std::tie(candidates[*best].interface_id, candidates[*best].bssid)))
@@ -387,7 +400,8 @@ std::vector<Bss> wifi_plan(const Bss& selected, const Discovery& scan, const Sna
     const auto* primary = find(topology, selected.interface_id);
     if (!primary || !primary->wireless) return {};
     if (mode == WifiMode::normal) return {selected};
-    struct Choice { const Bss* b; bool independent; int history; };
+    const bool trusted_present = policy.memory && !policy.memory->best_bssid.empty() && policy.memory->successes > policy.memory->failures;
+    struct Choice { const Bss* b; bool independent; int history; bool memory_good; unsigned density; };
     std::vector<Choice> alternatives;
     for (const auto& b : scan.bss) {
         if (b.profile != selected.profile || b.ssid != selected.ssid || b.security != selected.security || !b.infrastructure ||
@@ -397,20 +411,25 @@ std::vector<Bss> wifi_plan(const Bss& selected, const Discovery& scan, const Sna
         const bool independent = adapter->id != primary->id;
         if (independent && (!adapter->hardware_interface || !primary->hardware_interface || !adapter->wlan_idle || adapter->associated ||
             adapter->device_instance.empty() || primary->device_instance.empty() || adapter->device_instance == primary->device_instance)) continue;
-        alternatives.push_back({&b, independent, history_tier(b, policy, now)});
+        alternatives.push_back({&b, independent, history_tier(b, policy, now),
+            trusted_present && b.bssid == policy.memory->best_bssid, channel_density(scan, b)});
     }
     std::sort(alternatives.begin(), alternatives.end(), [](const Choice& a, const Choice& b) {
-        if (a.history != b.history) return a.history > b.history;
-        if (a.independent != b.independent) return a.independent;
+        if (a.memory_good != b.memory_good) return a.memory_good;          // persistent known-good first
+        if (a.history != b.history) return a.history > b.history;           // then fresh session evidence
+        if (a.independent != b.independent) return a.independent;           // then a separate idle radio
         // Same explainable preference as recommend_start: reported signal, with a bounded band bonus.
         const auto rank_signal = [](const Bss& x) { return x.rssi + (x.mhz >= 4900 && x.rssi >= -72 ? 6 : 0); };
         if (rank_signal(*a.b) != rank_signal(*b.b)) return rank_signal(*a.b) > rank_signal(*b.b);
+        if (a.density != b.density) return a.density < b.density;           // then the less crowded channel
         if (a.b->rssi != b.b->rssi) return a.b->rssi > b.b->rssi;
         return std::tie(a.b->interface_id, a.b->bssid) < std::tie(b.b->interface_id, b.b->bssid);
     });
+    // A full sweep tries every saved access point of the SSID (bounded); otherwise honour the budget.
+    const auto cap = policy.sweep ? wifi_sweep_cap : std::clamp(policy.max_attempts, 1u, wifi_max_attempts);
     std::vector<Bss> plan{selected};
     for (const auto& c : alternatives) {
-        if (plan.size() >= std::clamp(policy.max_attempts, 1u, wifi_max_attempts)) break;
+        if (plan.size() >= cap) break;
         if (std::none_of(plan.begin(), plan.end(), [&](const auto& p) { return same_bss(p, *c.b); })) plan.push_back(*c.b);
     }
     return plan;
@@ -456,8 +475,11 @@ WifiResult connect_wifi(Backend& backend, const Bss& selected, const Discovery& 
         const bool mutation = !(usable_link(*previous) && matches_wifi(*previous, trial, exact));
         if (mutation && previous->associated && result.recovery_attempted) continue;
         const auto tier = history_tier(trial, policy, start);
-        const auto reason = same_bss(trial, selected) ? WifiReason::selected : tier > 0 ? WifiReason::previous_success :
-            tier < 0 ? WifiReason::avoid_recent_failure : trial.interface_id != selected.interface_id ? WifiReason::independent_idle : WifiReason::signal;
+        const bool memory_good = policy.memory && record_trusts(*policy.memory, trial.bssid);
+        const auto reason = same_bss(trial, selected) ? WifiReason::selected : memory_good ? WifiReason::known_good :
+            tier > 0 ? WifiReason::previous_success : tier < 0 ? WifiReason::avoid_recent_failure :
+            trial.interface_id != selected.interface_id ? WifiReason::independent_idle :
+            channel_density(scan, trial) < channel_density(scan, selected) ? WifiReason::less_congested : WifiReason::signal;
         WifiAttempt attempt{trial, {}, {}, reason};
         const auto attempted_at = Clock::now();
         report(WifiStage::associating, index + 1, trial.bssid);
@@ -519,6 +541,22 @@ WifiResult connect_wifi(Backend& backend, const Bss& selected, const Discovery& 
         if (!retry_elsewhere(failure_class)) break;
     }
     return finish(WifiStatus::failed);
+}
+std::optional<RoamSuggestion> suggest_roam(const Interface& active, const Discovery& scan, const Snapshot& topology,
+                                           int weak_floor_dbm, int min_gain_db) {
+    if (!active.wireless || !active.associated || active.profile.empty() || active.ssid.empty() || !active.rssi) return std::nullopt;
+    if (*active.rssi > weak_floor_dbm) return std::nullopt; // only when the current link is weak
+    const int from = *active.rssi;
+    const Bss* best{};
+    for (const auto& b : scan.bss) {
+        if (b.ssid != active.ssid || b.profile != active.profile || !b.infrastructure || !bssid_format(b.bssid) || b.bssid == active.bssid) continue;
+        const auto* adapter = find(topology, b.interface_id);
+        if (!adapter || !adapter->wireless) continue;
+        if (b.rssi - from < min_gain_db) continue; // hysteresis: require a clear improvement
+        if (!best || b.rssi > best->rssi) best = &b;
+    }
+    if (!best) return std::nullopt;
+    return RoamSuggestion{*best, from, best->rssi};
 }
 
 }

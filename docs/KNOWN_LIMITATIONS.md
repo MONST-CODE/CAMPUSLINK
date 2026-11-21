@@ -15,6 +15,13 @@
 - When Windows does not confirm a fresh scan within 8 s, entries heard within the last two minutes are used (BSS host timestamps). A driver that does not fill the timestamp keeps its cached entries.
 - IPv4 only; IPv6-only networks are not validated. Multiple Wi-Fi adapters are supported for alternatives only when Windows reports distinct, idle physical devices.
 
+## Connection-first (0.5)
+
+- Per-network memory keys on SSID + security, not location: two different networks that share a name and security are merged. It is stored locally, holds no credentials, and is user-clearable. A remembered best access point is used as the start only when still in range above −80 dBm and with more successes than failures.
+- Channel density is an access-point count on the channel (a crude congestion proxy), used only as a deterministic tiebreak between equal signals — not airtime or measured load.
+- The multi-access-point sweep is bounded (`wifi_sweep_cap`); it trades a longer operation for more chances and is opt-in per connection.
+- The link watch samples every ~4 s on a separate thread and proposes a roam only when the current link is at or below −70 dBm and a same-network access point improves RSSI by at least 12 dB, and only when a scan is still fresh (< 2 min). It never scans or connects on its own; "Stay" suppresses proposals for 5 minutes. RSSI is a reported value, not a throughput or stability guarantee. The watch is session-only (not persisted) and off by default.
+
 ## Research lab
 
 - Physical CLP1 trials are IPv4-only and manually authorized per exact BSSID/profile; up to four candidates can be queued; shared devices are serialized. CLP1 rate includes protocol RTT; no wide-area or long-duration stability claim.
